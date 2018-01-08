@@ -16,7 +16,6 @@ import fcntl
 import getpass
 import itertools
 import logging
-import multiprocessing
 import os
 import pickle
 import platform
@@ -56,6 +55,11 @@ from autotest_lib.tko import models as tko_models
 from autotest_lib.tko import status_lib
 from autotest_lib.tko import parser_lib
 from autotest_lib.tko import utils as tko_utils
+
+try:
+    from chromite.lib import metrics
+except ImportError:
+    metrics = utils.metrics_mock
 
 
 INCREMENTAL_TKO_PARSING = global_config.global_config.get_config_value(
@@ -371,9 +375,12 @@ class server_job(base_job.base_job):
         self.harness = None
 
         if control:
-            self.max_result_size_KB = control_data.parse_control(
-                    control, raise_warnings=False).max_result_size_KB
+            parsed_control = control_data.parse_control(
+                    control, raise_warnings=False)
+            self.fast = parsed_control.fast
+            self.max_result_size_KB = parsed_control.max_result_size_KB
         else:
+            self.fast = False
             # Set the maximum result size to be the default specified in
             # global config, if the job has no control file associated.
             self.max_result_size_KB = control_data.DEFAULT_MAX_RESULT_SIZE_KB
@@ -439,8 +446,15 @@ class server_job(base_job.base_job):
         the database connection and inserts the basic job object into
         the database if necessary.
         """
+        if self.fast and not self._using_parser:
+            self.parser = parser_lib.parser(self._STATUS_VERSION)
+            self.job_model = self.parser.make_job(self.resultdir)
+            self.parser.start(self.job_model)
+            return
+
         if not self._using_parser:
             return
+
         # redirect parser debugging to .parse.log
         parse_log = os.path.join(self.resultdir, '.parse.log')
         parse_log = open(parse_log, 'w', 0)
@@ -468,8 +482,16 @@ class server_job(base_job.base_job):
         to carry out any remaining cleanup (e.g. flushing any
         remaining test results to the results db)
         """
+        if self.fast and not self._using_parser:
+            final_tests = self.parser.end()
+            for test in final_tests:
+                if status_lib.is_worse_than_or_equal_to(test.status, 'FAIL'):
+                    self.num_tests_failed += 1
+            return
+
         if not self._using_parser:
             return
+
         final_tests = self.parser.end()
         for test in final_tests:
             self.__insert_test(test)
@@ -812,8 +834,14 @@ class server_job(base_job.base_job):
         temp_control_file_dir = None
         try:
             try:
-                namespace['network_stats_label'] = 'at-start'
-                self._execute_code(GET_NETWORK_STATS_CONTROL_FILE, namespace)
+                if not self.fast:
+                    with metrics.SecondsTimer(
+                            'chromeos/autotest/job/get_network_stats',
+                            fields = {'stage': 'start'}):
+                        namespace['network_stats_label'] = 'at-start'
+                        self._execute_code(GET_NETWORK_STATS_CONTROL_FILE,
+                                           namespace)
+
                 if install_before and machines:
                     self._execute_code(INSTALL_CONTROL_FILE, namespace)
 
@@ -860,6 +888,9 @@ class server_job(base_job.base_job):
                 collect_crashinfo = self.failed_with_device_error
             except Exception as e:
                 try:
+                    # Add num_tests_failed if any extra exceptions are raised
+                    # outside _execute_code().
+                    self.num_tests_failed += 1
                     logging.exception(
                             'Exception escaped control file, job aborting:')
                     reason = re.sub(base_job.status_log_entry.BAD_CHAR_REGEX,
@@ -879,23 +910,31 @@ class server_job(base_job.base_job):
                                  temp_control_file_dir, e)
 
             if machines and (collect_crashdumps or collect_crashinfo):
-                if skip_crash_collection:
+                if skip_crash_collection or self.fast:
                     logging.info('Skipping crash dump/info collection '
                                  'as requested.')
                 else:
-                    namespace['test_start_time'] = test_start_time
-                    # Remove crash files for passing tests.
-                    # TODO(ayatane): Tests that create crash files should be
-                    # reported.
-                    namespace['has_failed_tests'] = self._has_failed_tests()
-                    self._collect_crashes(namespace, collect_crashinfo)
+                    with metrics.SecondsTimer(
+                            'chromeos/autotest/job/collect_crashinfo'):
+                        namespace['test_start_time'] = test_start_time
+                        # Remove crash files for passing tests.
+                        # TODO(ayatane): Tests that create crash files should be
+                        # reported.
+                        namespace['has_failed_tests'] = self._has_failed_tests()
+                        self._collect_crashes(namespace, collect_crashinfo)
             self.disable_external_logging()
             if self._uncollected_log_file and created_uncollected_logs:
                 os.remove(self._uncollected_log_file)
             if install_after and machines:
                 self._execute_code(INSTALL_CONTROL_FILE, namespace)
-            namespace['network_stats_label'] = 'at-end'
-            self._execute_code(GET_NETWORK_STATS_CONTROL_FILE, namespace)
+
+            if not self.fast:
+                with metrics.SecondsTimer(
+                        'chromeos/autotest/job/get_network_stats',
+                        fields = {'stage': 'end'}):
+                    namespace['network_stats_label'] = 'at-end'
+                    self._execute_code(GET_NETWORK_STATS_CONTROL_FILE,
+                                       namespace)
 
 
     def run_test(self, url, *args, **dargs):
@@ -1358,8 +1397,16 @@ class server_job(base_job.base_job):
 
 
     def _parse_status(self, new_line):
+        if self.fast and not self._using_parser:
+            logging.info('Parsing lines in fast mode')
+            new_tests = self.parser.process_lines([new_line])
+            for test in new_tests:
+                if status_lib.is_worse_than_or_equal_to(test.status, 'FAIL'):
+                    self.num_tests_failed += 1
+
         if not self._using_parser:
             return
+
         new_tests = self.parser.process_lines([new_line])
         for test in new_tests:
             self.__insert_test(test)

@@ -14,12 +14,10 @@ from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 from autotest_lib.server.hosts import cros_host
 from autotest_lib.server.hosts import cros_repair
 
+from chromite.lib import timeout_util
 
 AUTOTEST_INSTALL_DIR = global_config.global_config.get_config_value(
         'SCHEDULER', 'drone_installation_directory')
-
-ENABLE_SSH_TUNNEL_FOR_MOBLAB = global_config.global_config.get_config_value(
-        'CROS', 'enable_ssh_tunnel_for_moblab', type=bool, default=False)
 
 #'/usr/local/autotest'
 SHADOW_CONFIG_PATH = '%s/shadow_config.ini' % AUTOTEST_INSTALL_DIR
@@ -65,22 +63,21 @@ class MoblabHost(cros_host.CrosHost):
     def _initialize_frontend_rpcs(self, timeout_min):
         """Initialize frontends for AFE and TKO for a moblab host.
 
-        AFE and TKO are initialized differently based on |_use_tunnel|,
-        which indicates that whether to use ssh tunnel to connect to moblab.
+        We tunnel all communication to the frontends through an SSH tunnel as
+        many testing environments block everything except SSH access to the
+        moblab DUT.
 
         @param timeout_min: The timeout minuties for AFE services.
         """
-        if self._use_tunnel:
-            self.web_address = self.rpc_server_tracker.tunnel_connect(
-                    MOBLAB_PORT)
+        web_address = self.rpc_server_tracker.tunnel_connect(MOBLAB_PORT)
         # Pass timeout_min to self.afe
         self.afe = frontend_wrappers.RetryingAFE(timeout_min=timeout_min,
                                                  user='moblab',
-                                                 server=self.web_address)
+                                                 server=web_address)
         # Use default timeout_min of MoblabHost for self.tko
         self.tko = frontend_wrappers.RetryingTKO(timeout_min=self.timeout_min,
                                                  user='moblab',
-                                                 server=self.web_address)
+                                                 server=web_address)
 
 
     def _initialize(self, *args, **dargs):
@@ -94,9 +91,6 @@ class MoblabHost(cros_host.CrosHost):
         # tested.
         if dargs.get('retain_image_storage') is not True:
             self.run('rm -rf %s/*' % MOBLAB_IMAGE_STORAGE)
-        self.web_address = dargs.get('web_address', self.hostname)
-        self._use_tunnel = (ENABLE_SSH_TUNNEL_FOR_MOBLAB and
-                            self.web_address == self.hostname)
         self.timeout_min = dargs.get('rpc_timeout_min', 1)
         self._initialize_frontend_rpcs(self.timeout_min)
 
@@ -254,39 +248,25 @@ class MoblabHost(cros_host.CrosHost):
         super(MoblabHost, self).verify_software()
 
 
-    @retry.retry(error.AutoservError, timeout_min=0.5, delay_sec=10)
-    def _verify_upstart_service(self, service):
-        """Verify the required moblab service is up and running.
+    def _verify_upstart_service(self, service, timeout_m):
+        """Verify that the given moblab service is running.
 
-        upstart services depend on one another, so a small amount of delay is to
-        be expected between various services starting.
-
-        @param service: the moblab upstart service.
-
-        @return True if this service is started and running, otherwise False.
+        @param service: The upstart service to check for.
+        @timeout_m: Timeout (in minuts) before giving up.
+        @raises TimeoutException or UpstartServiceNotRunning if service isn't
+                running.
         """
-        if not self.upstart_status(service):
-            raise UpstartServiceNotRunning(service)
+        @retry.retry(error.AutoservError, timeout_min=timeout_m, delay_sec=10)
+        def _verify():
+            if not self.upstart_status(service):
+                raise UpstartServiceNotRunning(service)
+        _verify()
 
-
-    @retry.retry(error.AutoservError, timeout_min=5, delay_sec=10)
-    def _verify_upstart_service_long_wait(self, service):
-        """Verify that required moblab service is up, with a long retry.
-
-        The first moblab service can take a long time to start up. Especially on
-        first, boot lxc container setup can delay the services for ~5 minutes.
-
-        @param service: the moblab upstart service.
-
-        @return True if this service is started and running, otherwise False.
-        """
-        if not self.upstart_status(service):
-            raise UpstartServiceNotRunning(service)
-
-
-    def verify_moblab_services(self):
+    def verify_moblab_services(self, timeout_m):
         """Verify the required Moblab services are up and running.
 
+        @param timeout_m: Timeout (in minutes) for how long to wait for services
+                to start. Actual time taken may be slightly more than this.
         @raises AutoservError if any moblab service is not running.
         """
         if not MOBLAB_SERVICES:
@@ -294,13 +274,17 @@ class MoblabHost(cros_host.CrosHost):
 
         service = MOBLAB_SERVICES[0]
         try:
-            self._verify_upstart_service_long_wait(service)
+            # First service can take a long time to start, especially on first
+            # boot where container setup can take 5-10 minutes, depending on the
+            # device.
+            self._verify_upstart_service(service, timeout_m)
         except error.TimeoutException:
             raise error.UpstartServiceNotRunning(service)
 
         for service in MOBLAB_SERVICES[1:]:
             try:
-                self._verify_upstart_service(service)
+                # Follow up services should come up quickly.
+                self._verify_upstart_service(service, 0.5)
             except error.TimeoutException:
                 raise error.UpstartServiceNotRunning(service)
 
@@ -313,18 +297,21 @@ class MoblabHost(cros_host.CrosHost):
 
 
     def _check_afe(self):
-        """Verify whether afe of moblab works before verify its DUTs.
+        """Verify whether afe of moblab works before verifying its DUTs.
 
         Verifying moblab sometimes happens after a successful provision, in
         which case moblab is restarted but tunnel of afe is not re-connected.
         This func is used to check whether afe is working now.
 
-        @return True if afe works, otherwise, raise urllib2.HTTPError.
+        @return True if afe works.
+        @raises error.AutoservError if AFE is down; other exceptions are passed
+                through.
         """
         try:
             self.afe.get_hosts()
-        except error.TimeoutException:
-            raise error.AutoservError('Moblab AFE is not responding')
+        except (error.TimeoutException, timeout_util.TimeoutError) as e:
+            raise error.AutoservError('Moblab AFE is not responding: %s' %
+                                      str(e))
         except Exception as e:
             logging.error('Unknown exception when checking moblab AFE: %s', e)
             raise

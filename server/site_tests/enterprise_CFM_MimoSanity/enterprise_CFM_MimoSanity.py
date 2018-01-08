@@ -2,24 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import datetime, logging, time, random
+import logging
+import time
+import random
+
 from autotest_lib.client.common_lib import error
-from autotest_lib.client.bin import utils
-from autotest_lib.client.common_lib.cros import tpm_utils
-from autotest_lib.server import test
-from autotest_lib.server.cros.multimedia import remote_facade_factory
-from autotest_lib.client.common_lib.cros import get_usb_devices
+from autotest_lib.server.cros.cfm import cfm_base_test
 from autotest_lib.client.common_lib.cros import power_cycle_usb_util
+from autotest_lib.client.common_lib.cros.cfm.usb import cfm_usb_devices
+from autotest_lib.client.common_lib.cros.cfm.usb import usb_device_collector
 
 
-DUT_BOARD = 'guado'
-LONG_TIMEOUT = 30
+LONG_TIMEOUT = 20
 SHORT_TIMEOUT = 5
-MIMO_VID = '17e9'
-MIMO_PID = '016b'
+JABRA = cfm_usb_devices.JABRA_SPEAK_410
+HUDDLY_GO = cfm_usb_devices.HUDDLY_GO
+MIMO_VUE_HD_DISPLAY = cfm_usb_devices.MIMO_VUE_HD_DISPLAY
+MIMO_VUE_HID_TOUCH_CONTROLLER = cfm_usb_devices.MIMO_VUE_HID_TOUCH_CONTROLLER
 
 
-class enterprise_CFM_MimoSanity(test.test):
+class enterprise_CFM_MimoSanity(cfm_base_test.CfmBaseTest):
     """Tests the following fuctionality works on CFM enrolled devices:
            1. Verify CfM has Camera, Speaker and Mimo connected.
            2. Verify all peripherals have expected usb interfaces.
@@ -29,203 +31,137 @@ class enterprise_CFM_MimoSanity(test.test):
     version = 1
 
 
-    def _cmd_usb_devices(self):
-        """
-        Run linux cmd usb-devices
-        @returns the output of "usb-devices" as string
-        """
-        usb_devices = (self.client.run('usb-devices', ignore_status=True).
-                                         stdout.strip().split('\n\n'))
-        usb_data = get_usb_devices._extract_usb_data(
-                   '\nUSB-Device\n'+'\nUSB-Device\n'.join(usb_devices))
-        return usb_data
-
-
     def _power_cycle_mimo_device(self):
         """Power Cycle Mimo device"""
         logging.info('Plan to power cycle Mimo')
         try:
-            power_cycle_usb_util.power_cycle_usb_vidpid(self.client, self.board,
-                 MIMO_VID, MIMO_PID)
+            power_cycle_usb_util.power_cycle_usb_vidpid(
+                self._host, self._board,
+                MIMO_VUE_HD_DISPLAY.vendor_id, MIMO_VUE_HD_DISPLAY.product_id)
         except KeyError:
-           raise error.TestFail('Counld\'t find target device: '
-                                'vid:pid {}:{}'.format(MIMO_VID, MIMO_PID))
+           raise error.TestFail('Could not find target device: %s',
+                                MIMO_VUE_HD_DISPLAY.product)
 
 
-    def _run_power_cycle_mimo_test(self):
+    def _test_power_cycle_mimo(self):
         """Power Cycle Mimo device for multiple times"""
-        repeat = self.repeat
-        while repeat:
-            self._power_cycle_mimo_device()
-            logging.info('Powercycle done for Mimo %s:%s', MIMO_VID, MIMO_PID)
-            time.sleep(LONG_TIMEOUT)
-            self._kernel_usb_sanity_test()
-            self._run_hangout_test(True, 1)
-            repeat -= 1
+        self._power_cycle_mimo_device()
+        logging.info('Powercycle done for %s (%s)',
+                     MIMO_VUE_HD_DISPLAY.product, MIMO_VUE_HD_DISPLAY.vid_pid)
+        time.sleep(LONG_TIMEOUT)
+        self._kernel_usb_sanity_test()
 
 
     def _check_peripherals(self):
-        """Check CfM has camera, speaker and Mimo connected."""
-        speaker_list = get_usb_devices._get_speakers(self.usb_data)
-        peripheral_list = []
-        not_found = True
-        for _key in speaker_list.keys():
-            logging.info('Detect Audio device %s = %s',
-                         _key, speaker_list[_key])
-            if speaker_list[_key] != 0 and not_found:
-                not_found = False
-                peripheral_list.append(_key)
-                continue
+        """
+        Check CfM has camera, speaker and MiMO connected.
+        @returns list of peripherals found.
+        """
+        if not self.device_collector.get_devices_by_spec(JABRA):
+            raise error.TestFail('Expected to find connected speakers.')
 
-        camera_list = get_usb_devices._get_cameras(self.usb_data)
-        not_found = True
-        for _key in camera_list.keys():
-            logging.info('Detect Video device %s = %s',
-                         _key, camera_list[_key])
-            if camera_list[_key] != 0 and not_found:
-                not_found = False
-                peripheral_list.append(_key)
-                continue
+        if not self.device_collector.get_devices_by_spec(HUDDLY_GO):
+            raise error.TestFail('Expected to find a connected camera.')
 
-        display_list = get_usb_devices._get_display_mimo(self.usb_data)
-        not_found = True
-        for _key in display_list.keys():
-            logging.info('Detect Mimo displaylink device %s = %s',
-                         _key, display_list[_key])
-            if display_list[_key] != 0 and not_found:
-                not_found = False
-                peripheral_list.append(_key)
-                continue
-            if display_list[_key] != 0 and not not_found:
-                raise error.TestFail('Each Set of CfM should have only one type'
-                                     ' of Mimo Display connected')
-        if not_found:
-            raise error.TestFail('Each set of CfM should have at least one'
-                                 ' Mimo: Displaylink.')
 
-        controller_list = get_usb_devices._get_controller_mimo(self.usb_data)
-        not_found = True
-        for _key in controller_list.keys():
-            logging.info('Detect Mimo controller device %s = %s',
-                         _key, controller_list[_key])
+        displays = self.device_collector.get_devices_by_spec(
+            MIMO_VUE_HD_DISPLAY)
+        if not displays:
+            raise error.TestFail('Expected a MiMO display to be connected.')
+        if len(displays) != 1:
+            raise error.TestFail('Expected exactly one MiMO display to be '
+                                 'connected. Found %d' % len(displays))
 
-            if controller_list[_key] != 0 and not_found:
-                not_found = False
-                peripheral_list.append(_key)
-                continue
-            if controller_list[_key] != 0 and not not_found:
-                raise error.TestFail('Each Set of CfM should have only one type'
-                                     ' of Mimo Controller connected')
-        if not_found:
-            raise error.TestFail('Each set of CfM should have at least one'
-                                 ' Mimo: SiS Controller.')
 
-        return peripheral_list
+        controllers = self.device_collector.get_devices_by_spec(
+            MIMO_VUE_HID_TOUCH_CONTROLLER)
+        if not controllers:
+            raise error.TestFail('Expected a MiMO controller to be connected.')
+        if len(controllers) != 1:
+            raise error.TestFail('Expected exactly one MiMO controller to be '
+                                 'connected. Found %d' % len(controllers))
 
+    def _check_device_interfaces_match_spec(self, spec):
+        for device in self.device_collector.get_devices_by_spec(spec):
+            if not device.interfaces_match_spec(spec):
+                raise error.TestFail(
+                    'Device %s has unexpected interfaces.'
+                    'Expected: %s. Actual: %s' % (device, spec.interfaces,
+                                                  spec.interfaces))
 
     def _kernel_usb_sanity_test(self):
-        """Check connected camera, speaker and Mimo have
-        expected usb interfaces."""
-        self.usb_data = self._cmd_usb_devices()
-        for _key in self.usb_device_list:
-            state = []
-            number, state =  get_usb_devices._is_usb_device_ok(
-                               self.usb_data, _key)
-            if number < 1:
-                raise error.TestFail(
-                      'Expect at least one device %s connected,'
-                      'actual number of device = %d'
-                      % (_key, number))
-            if '0' in state:
-                raise error.TestFail(
-                    'Device %s have unexpected interfaces.' %(_key))
+        """
+        Check connected camera, speaker and Mimo have expected usb interfaces.
+        """
+        self._check_device_interfaces_match_spec(JABRA)
+        self._check_device_interfaces_match_spec(HUDDLY_GO)
+        self._check_device_interfaces_match_spec(MIMO_VUE_HD_DISPLAY)
+        self._check_device_interfaces_match_spec(MIMO_VUE_HID_TOUCH_CONTROLLER)
 
-
-    def _run_reboot_test(self):
+    def _test_reboot(self):
         """Reboot testing for Mimo."""
-        repeat = self.repeat
-        while repeat:
-           logging.info('Reboot CfM #: %d',self.rebootno)
-           self.rebootno += 1
-           self.client.reboot()
-           time.sleep(LONG_TIMEOUT)
-           self.cfm_facade.restart_chrome_for_cfm()
-           time.sleep(SHORT_TIMEOUT)
-           if self.is_meeting:
-               self.cfm_facade.wait_for_meetings_telemetry_commands()
-           else:
-               self.cfm_facade.wait_for_hangouts_telemetry_commands()
-           self.usb_data = self._cmd_usb_devices()
-           self._kernel_usb_sanity_test()
-           self._run_hangout_test(True, 1)
-           repeat -= 1
+
+        boot_id = self._host.get_boot_id()
+        self._host.reboot()
+        self._host.wait_for_restart(old_boot_id=boot_id)
+        self.cfm_facade.restart_chrome_for_cfm()
+        time.sleep(SHORT_TIMEOUT)
+        if self._is_meeting:
+            self.cfm_facade.wait_for_meetings_telemetry_commands()
+        else:
+            self.cfm_facade.wait_for_hangouts_telemetry_commands()
+        self._kernel_usb_sanity_test()
 
 
-    def _run_hangout_test(self, checkusb, repeat) :
-        """Start a hangout session and end the session after random time.
+    def _test_mimo_in_call(self) :
+        """
+        Start a hangout session and end the session after random time.
+
         @raises error.TestFail if any of the checks fail.
         """
-        repeat = int(repeat)
-        while repeat:
-            self.meetno += 1
-            logging.info('Meet_No: %d', self.meetno)
-            if self.is_meeting:
-                self.cfm_facade.start_meeting_session()
-            else:
-                self.cfm_facade.start_new_hangout_session(self.hangout)
-            time.sleep(random.randrange(SHORT_TIMEOUT, LONG_TIMEOUT))
-            if checkusb:
-                self.usb_data = self._cmd_usb_devices()
-                self._kernel_usb_sanity_test()
-            if self.is_meeting:
-                self.cfm_facade.end_meeting_session()
-            else:
-                self.cfm_facade.end_hangout_session()
-            repeat -= 1
-            logging.info('Meeting is ended................')
-
-
-    def run_once(self, host, hangout, repeat, is_meeting):
-        """Runs the test."""
-        self.client = host
-        self.board = DUT_BOARD
-        self.repeat = repeat
-        self.hangout = hangout
-        self.is_meeting = is_meeting
-        self.meetno = 0
-        self.rebootno = 0
-
-        self.usb_data = self._cmd_usb_devices()
-        if not self.usb_data:
-            raise error.TestFail('No usb devices found on DUT.')
+        logging.info('Joining meeting...')
+        if self._is_meeting:
+            self.cfm_facade.start_meeting_session()
         else:
-            self.usb_device_list = self._check_peripherals()
-            self._kernel_usb_sanity_test()
+            self.cfm_facade.start_new_hangout_session('mimo-sanity-test')
+        time.sleep(random.randrange(SHORT_TIMEOUT, LONG_TIMEOUT))
 
-        factory = remote_facade_factory.RemoteFacadeFactory(
-                  host, no_chrome=True)
-        self.cfm_facade = factory.create_cfm_facade()
+        # Verify USB data in-call.
+        self._kernel_usb_sanity_test()
 
-        tpm_utils.ClearTPMOwnerRequest(self.client)
+        if self._is_meeting:
+            self.cfm_facade.end_meeting_session()
+        else:
+            self.cfm_facade.end_hangout_session()
+        logging.info('Session has ended.')
 
-        if self.client.servo:
-            self.client.servo.switch_usbkey('dut')
-            self.client.servo.set('usb_mux_sel3', 'dut_sees_usbkey')
-            time.sleep(SHORT_TIMEOUT)
-            self._set_hub_power(True)
+        # Verify USB devices after leaving the call.
+        self._kernel_usb_sanity_test()
+        time.sleep(SHORT_TIMEOUT)
 
-        try:
-            self.cfm_facade.enroll_device()
-            self.cfm_facade.skip_oobe_after_enrollment()
-            self.cfm_facade.restart_chrome_for_cfm()
-            if self.is_meeting:
-                self.cfm_facade.wait_for_meetings_telemetry_commands()
-            else:
-                self.cfm_facade.wait_for_hangouts_telemetry_commands()
-        except Exception as e:
-            raise error.TestFail(str(e))
 
-        self._run_reboot_test()
-        self._run_power_cycle_mimo_test()
+    def run_once(self, repetitions, is_meeting):
+        """
+        Runs the test.
 
-        tpm_utils.ClearTPMOwnerRequest(self.client)
+        @param repetitions: amount of reboot cycles to perform.
+        """
+        # Remove 'board:' prefix.
+        self._board = self._host.get_board().split(':')[1]
+        self._is_meeting = is_meeting
+
+        self.device_collector = usb_device_collector.UsbDeviceCollector(
+            self._host)
+        self._check_peripherals()
+        self._kernel_usb_sanity_test()
+
+        if self._is_meeting:
+            self.cfm_facade.wait_for_meetings_telemetry_commands()
+        else:
+            self.cfm_facade.wait_for_hangouts_telemetry_commands()
+
+        for i in xrange(1, repetitions + 1):
+            logging.info('Running test cycle %d/%d', i, repetitions)
+            self._test_reboot()
+            self._test_mimo_in_call()
+            self._test_power_cycle_mimo()

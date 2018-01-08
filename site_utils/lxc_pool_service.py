@@ -19,6 +19,11 @@ from autotest_lib.server import server_logging_config
 from autotest_lib.site_utils import lxc
 from autotest_lib.site_utils.lxc import container_pool
 
+try:
+    from chromite.lib import ts_mon_config
+except ImportError:
+    ts_mon_config = utils.metrics_mock
+
 
 # Location and base name of log files.
 _LOG_LOCATION = '/usr/local/autotest/logs'
@@ -38,6 +43,14 @@ def _start(args):
         logging.warning('SSP requires root privilege to run commands, please '
                         'grant root access to this process.')
         utils.run('sudo true')
+
+    # Configure logging.
+    config = server_logging_config.ServerLoggingConfig()
+    config.configure_logging(verbose=args.verbose)
+    config.add_debug_file_handlers(log_dir=_LOG_LOCATION, log_name=_LOG_NAME)
+    # Pool code is heavily multi-threaded.  This will help debugging.
+    logging_config.add_threadname_in_log()
+
     host_dir = lxc.SharedHostDir()
     service = container_pool.Service(host_dir)
     # Catch signals, and send the appropriate stop request to the service
@@ -47,9 +60,12 @@ def _start(args):
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda s, f: service.stop())
 
-    # Start the service.  This blocks and does not return till the service shuts
-    # down.
-    service.start(pool_size=args.size)
+    with ts_mon_config.SetupTsMonGlobalState(service_name='lxc_pool_service',
+                                             indirect=True,
+                                             short_lived=False):
+        # Start the service.  This blocks and does not return till the service
+        # shuts down.
+        service.start(pool_size=args.size)
 
 
 def _status(_args):
@@ -117,13 +133,6 @@ def main():
     """Main function."""
     # Parse args
     args = parse_args()
-
-    # Configure logging.
-    config = server_logging_config.ServerLoggingConfig()
-    config.configure_logging(verbose=args.verbose)
-    config.add_debug_file_handlers(log_dir=_LOG_LOCATION, log_name=_LOG_NAME)
-    # Pool code is heavily multi-threaded.  This will help debugging.
-    logging_config.add_threadname_in_log()
 
     # Dispatch control to the appropriate helper.
     args.func(args)

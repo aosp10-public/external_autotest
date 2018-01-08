@@ -107,6 +107,11 @@ class SystemFacadeNative(object):
         """
         return utils.get_ec_temperatures()
 
+    def get_current_temperature_max(self):
+        """
+        Returns the highest reported board temperature (all sensors) in Celsius.
+        """
+        return utils.get_current_temperature_max()
 
     def get_current_board(self):
         """Returns the current device board name."""
@@ -118,3 +123,9 @@ class SystemFacadeNative(object):
         fail.
         """
         return utils.get_chromeos_release_version()
+
+    def get_num_allocated_file_handles(self):
+        """
+        Returns the number of currently allocated file handles.
+        """
+        return utils.get_num_allocated_file_handles()

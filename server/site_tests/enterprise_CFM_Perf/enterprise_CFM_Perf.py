@@ -2,23 +2,48 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import csv, datetime, glob, json, os, re, time
+import datetime
+import glob
+import os
+import time
 
-from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error
+from autotest_lib.client.common_lib.cros import system_metrics_collector
+from autotest_lib.client.common_lib.cros.cfm.metrics import (
+        media_metrics_collector)
 from autotest_lib.server.cros import cfm_jmidata_log_collector
 from autotest_lib.server.cros.cfm import cfm_base_test
 
 _SHORT_TIMEOUT = 5
 _MEASUREMENT_DURATION_SECONDS = 10
 _TOTAL_TEST_DURATION_SECONDS = 900
-_PERF_RESULT_FILE = 'perf.csv'
-_JMI_RESULT_FILE = 'jmidata.json'
 
 _BASE_DIR = '/home/chronos/user/Storage/ext/'
 _EXT_ID = 'ikfcpmgefdpheiiomgmhlmmkihchmdlj'
 _JMI_DIR = '/0*/File\ System/000/t/00/*'
 _JMI_SOURCE_DIR = _BASE_DIR + _EXT_ID + _JMI_DIR
+
+class ParticipantCountMetric(system_metrics_collector.Metric):
+    """
+    Metric for getting the current participant count in a call.
+    """
+    def __init__(self, cfm_facade):
+        """
+        Initializes with a cfm_facade.
+
+        @param cfm_facade object having a get_participant_count() method.
+        """
+        super(ParticipantCountMetric, self).__init__(
+                'participant_count',
+                'participants',
+                higher_is_better=True)
+        self.cfm_facade = cfm_facade
+
+    def collect_metric(self):
+        """
+        Collects one metric value.
+        """
+        self.values.append(self.cfm_facade.get_participant_count())
 
 
 class enterprise_CFM_Perf(cfm_base_test.CfmBaseTest):
@@ -27,48 +52,6 @@ class enterprise_CFM_Perf(cfm_base_test.CfmBaseTest):
     mode. After enrollment is successful, it collects and logs cpu, memory and
     temperature data from the device under test."""
     version = 1
-
-
-    def _cpu_usage(self):
-        """Returns cpu usage in %."""
-        cpu_usage_start = self.system_facade.get_cpu_usage()
-        time.sleep(_MEASUREMENT_DURATION_SECONDS)
-        cpu_usage_end = self.system_facade.get_cpu_usage()
-        return self.system_facade.compute_active_cpu_time(cpu_usage_start,
-                cpu_usage_end) * 100
-
-
-    def _memory_usage(self):
-        """Returns total used memory in %."""
-        total_memory = self.system_facade.get_mem_total()
-        free_memory = self.system_facade.get_mem_free_plus_buffers_and_cached()
-        used_memory = total_memory - free_memory
-        return (used_memory * 100) / total_memory
-
-
-    def _temperature_data(self):
-        """Returns temperature sensor data in degrees Celsius."""
-        ectool = self._host.run('ectool version', ignore_status=True)
-        if not ectool.exit_status:
-            ec_temp = self.system_facade.get_ec_temperatures()
-            return ec_temp[1]
-        else:
-            temp_sensor_name = 'temp0'
-            MOSYS_OUTPUT_RE = re.compile('(\w+)="(.*?)"')
-            values = {}
-            cmd = 'mosys -k sensor print thermal %s' % temp_sensor_name
-            for kv in MOSYS_OUTPUT_RE.finditer(self._host.run_output(cmd)):
-                key, value = kv.groups()
-                if key == 'reading':
-                    value = int(value)
-                values[key] = value
-            return values['reading']
-
-
-    def _participant_count(self):
-        """Gets the current participant count."""
-        return self.cfm_facade.get_participant_count()
-
 
     def start_hangout(self):
         """Waits for the landing page and starts a hangout session."""
@@ -87,85 +70,18 @@ class enterprise_CFM_Perf(cfm_base_test.CfmBaseTest):
 
 
     def collect_perf_data(self):
-        """Collect run time data from the DUT using xmlrpc and save it to csv
-        file in results directory. Data collected includes:
-                1. CPU usage
-                2. Memory usage
-                3. Thermal temperature
-                4. Participant count in the session
-                5. Timestamp
-                6. Board name
-                7. Build id
+        """
+        Collects run time data from the DUT using system_metrics_collector.
+        Writes the data to the chrome perf dashboard.
         """
         start_time = time.time()
-        perf_keyval = {}
-        cpu_usage_list = list()
-        memory_usage_list = list()
-        temperature_list = list()
-        participant_count_list = list()
-        board_name = self.system_facade.get_current_board()
-        build_id = self.system_facade.get_chromeos_release_version()
-        perf_file = open(os.path.join(self.resultsdir, _PERF_RESULT_FILE), 'w')
-        writer = csv.writer(perf_file)
-        writer.writerow(['cpu', 'memory', 'temperature', 'participant_count',
-                         'timestamp', 'board','build'])
         while (time.time() - start_time) < _TOTAL_TEST_DURATION_SECONDS:
-            # Note: No sleep in this loop, self._cpu_usage() sleeps.
-            perf_keyval['cpu_usage'] = self._cpu_usage()
-            perf_keyval['memory_usage'] = self._memory_usage()
-            perf_keyval['temperature'] = self._temperature_data()
-            perf_keyval['participant_count'] = self._participant_count()
-            writer.writerow([perf_keyval['cpu_usage'],
-                             perf_keyval['memory_usage'],
-                             perf_keyval['temperature'],
-                             perf_keyval['participant_count'],
-                             time.strftime('%Y/%m/%d %H:%M:%S'),
-                             board_name,
-                             build_id])
-            self.write_perf_keyval(perf_keyval)
-            cpu_usage_list.append(perf_keyval['cpu_usage'])
-            memory_usage_list.append(perf_keyval['memory_usage'])
-            temperature_list.append(perf_keyval['temperature'])
-            participant_count_list.append(perf_keyval['participant_count'])
-        perf_file.close()
-        utils.write_keyval(os.path.join(self.resultsdir, os.pardir),
-                           {'perf_csv_folder': self.resultsdir})
-        self.upload_perf_data(cpu_usage_list,
-                              memory_usage_list,
-                              temperature_list,
-                              participant_count_list)
-
-
-    def upload_perf_data(self, cpu_usage, memory_usage, temperature,
-                         participant_count):
-        """Write perf results to results-chart.json file for Perf Dashboard.
-
-        @param cpu_usage: list of cpu usage values
-        @param memory_usage: list of memory usage values
-        @param temperature: list of temperature values
-        @param participant_count: list of participant_count values
-        """
-        self.output_perf_value(description='cpu_usage',
-                value=cpu_usage, units='percent', higher_is_better=False)
-        self.output_perf_value(description='memory_usage',
-                value=memory_usage, units='percent', higher_is_better=False)
-        self.output_perf_value(description='temperature',
-                value=temperature, units='Celsius', higher_is_better=False)
-        self.output_perf_value(description='participant_count',
-                value=participant_count, units='participants',
-                higher_is_better=True)
-
-        # Report peak values to catch any outliers.
-        peak_cpu_usage = max(cpu_usage)
-        peak_memory_usage = max(memory_usage)
-        peak_temp = max(temperature)
-        self.output_perf_value(description='peak_cpu_usage',
-                value=peak_cpu_usage, units='percent', higher_is_better=False)
-        self.output_perf_value(description='peak_memory_usage',
-                value=peak_memory_usage, units='percent',
-                higher_is_better=False)
-        self.output_perf_value(description='peak_temperature',
-                value=peak_temp, units='Celsius', higher_is_better=False)
+            time.sleep(_MEASUREMENT_DURATION_SECONDS)
+            self.metrics_collector.collect_snapshot()
+            if self.is_meeting:
+                # Media metrics collector is only available for Meet.
+                self.media_metrics_collector.collect_snapshot()
+        self.metrics_collector.write_metrics(self.output_perf_value)
 
     def _get_average(self, data_type, jmidata):
         """Computes mean of a list of numbers.
@@ -227,8 +143,26 @@ class enterprise_CFM_Perf(cfm_base_test.CfmBaseTest):
         @param jmidata: Raw jmi data log to parse.
         @return Data for given data type from jmidata log.
         """
-        return cfm_jmidata_log_collector.GetDataFromLogs(
-                self, data_type, jmidata)
+        if self.is_meeting:
+            try:
+                timestamped_values = self.media_metrics_collector.get_metric(
+                        data_type)
+            except KeyError:
+                # Ensure we always return at least one element, or perf uploads
+                # will be sad.
+                return [0]
+            # Strip timestamps.
+            values = [x[1] for x in timestamped_values]
+            # Each entry in values is a list, extract the raw values:
+            res = []
+            for value_list in values:
+                res.extend(value_list)
+            # Ensure we always return at least one element, or perf uploads will
+            # be sad.
+            return res or [0]
+        else:
+            return cfm_jmidata_log_collector.GetDataFromLogs(
+                    self, data_type, jmidata)
 
 
     def _get_file_to_parse(self):
@@ -243,63 +177,13 @@ class enterprise_CFM_Perf(cfm_base_test.CfmBaseTest):
         newest_file = max(glob.iglob(source_jmi_files), key=os.path.getctime)
         return newest_file
 
-
-    def _dump_raw_jmi_data(self, jmidata):
-        """
-        Write the raw JMI data into the _JMI_RESULT_FILE for later processing.
-        """
-        data_types = [
-            'frames_decoded',
-            'frames_encoded',
-            'adaptation_changes',
-            'average_encode_time',
-            'bandwidth_adaptation',
-            'cpu_adaptation',
-            'video_received_frame_height',
-            'video_sent_frame_height',
-            'framerate_decoded',
-            'framerate_outgoing',
-            'framerate_to_renderer',
-            'framerate_received',
-            'framerate_sent',
-            'video_received_frame_width',
-            'video_sent_frame_width',
-            'video_encode_cpu_usage',
-            'video_packets_sent',
-            'video_packets_lost',
-            'cpu_processors',
-            'cpu_percent',
-            'renderer_cpu_percent',
-            'browser_cpu_percent',
-            'gpu_cpu_percent',
-            'num_active_vid_in_streams',
-        ]
-
-        # Collect all the raw JMI values into a dictionary.
-        results = {}
-        for data_type in data_types:
-            data = self._get_data_from_jmifile(data_type, jmidata)
-            if not data:
-                data = -1
-            results[data_type] = data
-
-        # Dump the dictionary as json into a log file.
-        result_file_path = os.path.join(self.resultsdir, _JMI_RESULT_FILE)
-        with open(result_file_path, 'w') as fp:
-            fp.write(json.dumps(results, indent=2))
-
-
     def upload_jmidata(self):
         """
-        Write jmidata results to results-chart.json file for Perf Dashboard
-        and also save the raw data.
+        Write jmidata results to results-chart.json file for Perf Dashboard.
         """
         jmi_file = self._get_file_to_parse()
         jmifile_to_parse = open(jmi_file, 'r')
         jmidata = jmifile_to_parse.read()
-
-        # Start by saving the jmi data separately as raw values in a json file.
-        self._dump_raw_jmi_data(jmidata)
 
         # Compute and save aggregated stats from JMI.
         self.output_perf_value(description='sum_vid_in_frames_decoded',
@@ -412,17 +296,30 @@ class enterprise_CFM_Perf(cfm_base_test.CfmBaseTest):
                 units='count', higher_is_better=True)
 
 
-    def initialize(self, host):
+    def initialize(self, host, run_test_only=False):
         """
         Initializes common test properties.
 
         @param host: a host object representing the DUT.
+        @param run_test_only: Wheter to run only the test or to also perform
+            deprovisioning, enrollment and system reboot. See cfm_base_test.
         """
-        super(enterprise_CFM_Perf, self).initialize(host)
+        super(enterprise_CFM_Perf, self).initialize(host, run_test_only)
         self.system_facade = self._facade_factory.create_system_facade()
+        metrics = system_metrics_collector.create_default_metric_set(
+                self.system_facade)
+        metrics.append(ParticipantCountMetric(self.cfm_facade))
+        self.metrics_collector = (system_metrics_collector.
+                                  SystemMetricsCollector(self.system_facade,
+                                                         metrics))
+        data_point_collector = media_metrics_collector.DataPointCollector(
+                self.cfm_facade)
+        self.media_metrics_collector = (media_metrics_collector
+                                        .MetricsCollector(data_point_collector))
 
     def run_once(self, is_meeting=False):
         """Stays in a meeting/hangout and collects perf data."""
+        self.is_meeting = is_meeting
         if is_meeting:
             self.join_meeting()
         else:

@@ -24,6 +24,7 @@ from autotest_lib.client.common_lib import global_config
 from autotest_lib.client.common_lib import priorities
 from autotest_lib.client.common_lib import time_utils
 from autotest_lib.client.common_lib import utils
+from autotest_lib.frontend.afe import model_attributes
 from autotest_lib.frontend.afe.json_rpc import proxy
 from autotest_lib.server.cros import provision
 from autotest_lib.server.cros.dynamic_suite import constants
@@ -341,6 +342,9 @@ class _SuiteChildJobCreator(object):
         if utils.is_moblab():
             test_priority = max(self._priority, test.priority)
 
+        reboot_before = (model_attributes.RebootBefore.NEVER if test.fast
+                         else None)
+
         test_obj = self._afe.create_job(
             control_file=test.text,
             name=tools.create_job_name(
@@ -355,6 +359,8 @@ class _SuiteChildJobCreator(object):
             timeout_mins=self._timeout_mins,
             parent_job_id=self._suite_job_id,
             test_retry=test.retries,
+            reboot_before=reboot_before,
+            run_reset=not test.fast,
             priority=test_priority,
             synch_count=test.sync_count,
             require_ssp=test.require_ssp)
@@ -1067,6 +1073,7 @@ class _BaseSuite(object):
         if pool:
             extra_deps.append(pool)
         extra_deps.extend(child_dependencies)
+        self._dependencies = tuple(extra_deps)
 
         self._job_creator = _SuiteChildJobCreator(
             tag=tag,
@@ -1334,6 +1341,11 @@ class _BaseSuite(object):
         """
         test = self._jobs_to_tests[result.id]
         try:
+            # It only takes effect for CQ retriable job:
+            #   1) in first try, test.fast=True.
+            #   2) in second try, test will be run in normal mode, so reset
+            #       test.fast=False.
+            test.fast = False
             new_job = self._schedule_test(
                     record=record, test=test, retry_for=result.id)
         except (error.RPCException, proxy.JSONRPCException) as e:
@@ -1635,8 +1647,8 @@ class ProvisionSuite(_BaseSuite):
             builds,
             board,
             devserver,
-            num,
             num_required,
+            num_max=float('inf'),
             cf_getter=None,
             run_prod_code=False,
             test_args=None,
@@ -1649,8 +1661,10 @@ class ProvisionSuite(_BaseSuite):
         @param builds: the builds on which we're running this suite.
         @param board: the board on which we're running this suite.
         @param devserver: the devserver which contains the build.
-        @param num: number of dummy tests to make.
-        @param num_required: number of tests that must pass.
+        @param num_required: number of tests that must pass.  This is
+                             capped by the number of tests that are run.
+        @param num_max: max number of tests to make.  By default there
+                        is no cap, a test is created for each eligible host.
         @param cf_getter: a control_file_getter.ControlFileGetter.
         @param test_args: A dict of args passed all the way to each individual
                           test that will be actually ran.
@@ -1658,16 +1672,29 @@ class ProvisionSuite(_BaseSuite):
         @param kwargs: Various keyword arguments passed to
                        _BaseSuite constructor.
         """
-        dummy_test = _load_dummy_test(
-                builds, devserver, cf_getter,
-                run_prod_code, test_args, test_source_build)
         super(ProvisionSuite, self).__init__(
-                tests=[dummy_test] * num,
+                tests=[],
                 tag=tag,
                 builds=builds,
                 board=board,
                 **kwargs)
-        self._num_required = num_required
+        dummy_test = _load_dummy_test(
+                builds, devserver, cf_getter,
+                run_prod_code, test_args, test_source_build)
+        static_deps = [dep for dep in self._dependencies
+                       if not provision.Provision.acts_on(dep)]
+        hosts = self._afe.get_hosts(
+                invalid=False, multiple_labels=static_deps)
+        logging.debug('Looking for hosts matching %r', static_deps)
+        logging.debug('Found %d matching hosts for ProvisionSuite', len(hosts))
+        available_hosts = [h for h in hosts if h.is_available()]
+        logging.debug('Found %d available hosts for ProvisionSuite',
+                      len(available_hosts))
+        self.tests = [dummy_test] * min(len(available_hosts), num_max)
+        logging.debug('Made %d tests for ProvisionSuite', len(self.tests))
+        self._num_required = min(num_required, len(self.tests))
+        logging.debug('Expecting %d tests to pass for ProvisionSuite',
+                      self._num_required)
         self._num_successful = 0
 
     def _handle_result(self, result, record, waiter):

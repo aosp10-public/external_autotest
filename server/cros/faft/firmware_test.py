@@ -131,6 +131,9 @@ class FirmwareTest(FAFTBase):
                                        % (host.POWER_CONTROL_VALID_ARGS,
                                        self.power_control))
 
+        if not self.faft_client.system.dev_tpm_present():
+            raise error.TestError('/dev/tpm0 does not exist on the client')
+
         self.faft_config = FAFTConfig(
                 self.faft_client.system.get_platform_name())
         self.checkers = FAFTCheckers(self)
@@ -162,7 +165,7 @@ class FirmwareTest(FAFTBase):
                 logging.info('mainfw_act is B. rebooting to set it A')
                 self.switcher.mode_aware_reboot()
         self._setup_gbb_flags()
-        self._stop_service('update-engine')
+        self.faft_client.updater.stop_daemon()
         self._create_faft_lockfile()
         self._setup_ec_write_protect(ec_wp)
         # See chromium:239034 regarding needing this sync.
@@ -182,7 +185,7 @@ class FirmwareTest(FAFTBase):
         self.switcher.restore_mode()
         self._restore_ec_write_protect()
         self._restore_gbb_flags()
-        self._start_service('update-engine')
+        self.faft_client.updater.start_daemon()
         self._remove_faft_lockfile()
         self._record_servo_log()
         self._record_faft_client_log()
@@ -455,24 +458,6 @@ class FirmwareTest(FAFTBase):
         command = 'rm -f %s' % (self.lockfile)
         self.faft_client.system.run_shell_command(command)
 
-    def _stop_service(self, service):
-        """Stops a upstart service on the client.
-
-        @param service: The name of the upstart service.
-        """
-        logging.info('Stopping %s...', service)
-        command = 'status %s | grep stop || stop %s' % (service, service)
-        self.faft_client.system.run_shell_command(command)
-
-    def _start_service(self, service):
-        """Starts a upstart service on the client.
-
-        @param service: The name of the upstart service.
-        """
-        logging.info('Starting %s...', service)
-        command = 'status %s | grep start || start %s' % (service, service)
-        self.faft_client.system.run_shell_command(command)
-
     def clear_set_gbb_flags(self, clear_mask, set_mask):
         """Clear and set the GBB flags in the current flashrom.
 
@@ -676,16 +661,15 @@ class FirmwareTest(FAFTBase):
         """Setup the CPU/EC/PD UART capture."""
         self.cpu_uart_file = os.path.join(self.resultsdir, 'cpu_uart.txt')
         self.servo.set('cpu_uart_capture', 'on')
-        self.cr50_console_file = None
+        self.cr50_uart_file = None
         self.ec_uart_file = None
         self.usbpd_uart_file = None
         try:
-            self.servo.set('cr50_console_capture', 'on')
-            self.cr50_console_file = os.path.join(self.resultsdir,
-                                                  'cr50_console.txt')
             # Check that the console works before declaring the cr50 console
-            # connection exists.
+            # connection exists and enabling uart capture.
             self.servo.get('cr50_version')
+            self.servo.set('cr50_uart_capture', 'on')
+            self.cr50_uart_file = os.path.join(self.resultsdir, 'cr50_uart.txt')
             self.cr50 = chrome_cr50.ChromeCr50(self.servo)
         except error.TestFail as e:
             if 'No control named' in str(e):
@@ -716,9 +700,9 @@ class FirmwareTest(FAFTBase):
         if self.cpu_uart_file:
             with open(self.cpu_uart_file, 'a') as f:
                 f.write(ast.literal_eval(self.servo.get('cpu_uart_stream')))
-        if self.cr50_console_file:
-            with open(self.cr50_console_file, 'a') as f:
-                f.write(ast.literal_eval(self.servo.get('cr50_console_stream')))
+        if self.cr50_uart_file:
+            with open(self.cr50_uart_file, 'a') as f:
+                f.write(ast.literal_eval(self.servo.get('cr50_uart_stream')))
         if self.ec_uart_file and self.faft_config.chrome_ec:
             with open(self.ec_uart_file, 'a') as f:
                 f.write(ast.literal_eval(self.servo.get('ec_uart_stream')))
@@ -732,8 +716,8 @@ class FirmwareTest(FAFTBase):
         # Flush the remaining UART output.
         self._record_uart_capture()
         self.servo.set('cpu_uart_capture', 'off')
-        if self.cr50_console_file:
-            self.servo.set('cr50_console_capture', 'off')
+        if self.cr50_uart_file:
+            self.servo.set('cr50_uart_capture', 'off')
         if self.ec_uart_file and self.faft_config.chrome_ec:
             self.servo.set('ec_uart_capture', 'off')
         if (self.usbpd_uart_file and self.faft_config.chrome_ec and
@@ -1254,10 +1238,11 @@ class FirmwareTest(FAFTBase):
         """Clear the firmware saved by the method backup_firmware."""
         self._backup_firmware_sha = ()
 
-    def restore_firmware(self, suffix='.original'):
+    def restore_firmware(self, suffix='.original', restore_ec=True):
         """Restore firmware from host in resultsdir.
 
         @param suffix: a string appended to backup file name
+        @param restore_ec: True to restore the ec firmware; False not to do.
         """
         if not self.is_firmware_changed():
             return
@@ -1273,7 +1258,7 @@ class FirmwareTest(FAFTBase):
         self.faft_client.bios.write_whole(
             os.path.join(remote_temp_dir, 'bios'))
 
-        if self.faft_config.chrome_ec:
+        if self.faft_config.chrome_ec and restore_ec:
             self._client.send_file(os.path.join(self.resultsdir, 'ec' + suffix),
                 os.path.join(remote_temp_dir, 'ec'))
             self.faft_client.ec.write_whole(

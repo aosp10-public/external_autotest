@@ -96,14 +96,6 @@ class RpcInterfaceTest(unittest.TestCase,
         self._check_hostnames(hosts, ['host1'])
 
 
-    def test_get_hosts_exclude_only_if_needed(self):
-        self.hosts[0].labels.add(self.label3)
-
-        hosts = rpc_interface.get_hosts(hostname__in=['host1', 'host2'],
-                                        exclude_only_if_needed_labels=True)
-        self._check_hostnames(hosts, ['host2'])
-
-
     def test_job_keyvals(self):
         keyval_dict = {'mykey': 'myvalue'}
         job_id = rpc_interface.create_job(name='test',
@@ -840,32 +832,6 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
                           pool=None)
 
 
-    def testBadNumArgument(self):
-        """Ensure we handle bad values for the |num| argument."""
-        self.assertRaises(error.SuiteArgumentException,
-                          rpc_interface.create_suite_job,
-                          name=self._NAME,
-                          board=self._BOARD,
-                          builds=self._BUILDS,
-                          pool=None,
-                          num='goo')
-        self.assertRaises(error.SuiteArgumentException,
-                          rpc_interface.create_suite_job,
-                          name=self._NAME,
-                          board=self._BOARD,
-                          builds=self._BUILDS,
-                          pool=None,
-                          num=[])
-        self.assertRaises(error.SuiteArgumentException,
-                          rpc_interface.create_suite_job,
-                          name=self._NAME,
-                          board=self._BOARD,
-                          builds=self._BUILDS,
-                          pool=None,
-                          num='5')
-
-
-
     def testCreateSuiteJobFail(self):
         """Ensure that failure to schedule the suite job fails the RPC."""
         self._mockDevServerGetter()
@@ -931,30 +897,6 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
                                          builds=self._BUILDS,
                                          pool=None, check_hosts=False),
           job_id)
-
-    def testCreateSuiteIntegerNum(self):
-        """Ensures that success results in a successful RPC."""
-        self._mockDevServerGetter()
-
-        self.dev_server.hostname = 'mox_url'
-        self.dev_server.stage_artifacts(
-                image=self._BUILD, artifacts=['test_suites']).AndReturn(True)
-
-        self.getter.get_control_file_contents_by_name(
-            self._SUITE_NAME).AndReturn('f')
-
-        self.dev_server.url().AndReturn('mox_url')
-        job_id = 5
-        self._mockRpcUtils(job_id, control_file_substring='num=17')
-        self.mox.ReplayAll()
-        self.assertEquals(
-            rpc_interface.create_suite_job(name=self._NAME,
-                                           board=self._BOARD,
-                                           builds=self._BUILDS,
-                                           pool=None,
-                                           check_hosts=False,
-                                           num=17),
-            job_id)
 
 
     def testCreateSuiteJobControlFileSupplied(self):

@@ -56,11 +56,14 @@ class firmware_FwScreenCloseLid(FirmwareTest):
             self.corrupt_usb_kernel(usb_dev)
 
     def cleanup(self):
-        if self.faft_config.has_lid:
-            self.servo.switch_usbkey('host')
-            usb_dev = self.servo.probe_host_usb_dev()
-            # Restore kernel of USB stick which is corrupted on setup phase.
-            self.restore_usb_kernel(usb_dev)
+        try:
+            if self.faft_config.has_lid:
+                self.servo.switch_usbkey('host')
+                usb_dev = self.servo.probe_host_usb_dev()
+                # Restore kernel of USB stick which is corrupted on setup phase.
+                self.restore_usb_kernel(usb_dev)
+        except Exception as e:
+            logging.error("Caught exception: %s", str(e))
         super(firmware_FwScreenCloseLid, self).cleanup()
 
     def run_once(self):
@@ -68,7 +71,8 @@ class firmware_FwScreenCloseLid(FirmwareTest):
             logging.info('This test does nothing on devices without lid.')
             return
 
-        if self.faft_config.fw_bypasser_type != 'ctrl_d_bypasser':
+        if (self.faft_config.fw_bypasser_type != 'ctrl_d_bypasser'
+          and self.faft_config.fw_bypasser_type != 'tablet_detachable_bypasser'):
             raise error.TestNAError("This test is only valid on devices with "
                                     "screens.")
 

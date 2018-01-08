@@ -3,17 +3,18 @@
 # found in the LICENSE file.
 
 import collections, logging, numpy, os, tempfile, time
-from autotest_lib.client.bin import utils, test
+from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib import file_utils
-from autotest_lib.client.common_lib.cros import chrome
+from autotest_lib.client.common_lib.cros import arc, arc_common, chrome
 from autotest_lib.client.common_lib.cros.network import xmlrpc_datatypes
 from autotest_lib.client.common_lib.cros.network import xmlrpc_security_types
 from autotest_lib.client.cros import backchannel, httpd
 from autotest_lib.client.cros import memory_bandwidth_logger
-from autotest_lib.client.cros import power_rapl, power_status, power_utils
 from autotest_lib.client.cros import service_stopper
 from autotest_lib.client.cros.audio import audio_helper
+from autotest_lib.client.cros.power import power_dashboard
+from autotest_lib.client.cros.power import power_rapl, power_status, power_utils
 from autotest_lib.client.cros.networking import wifi_proxy
 from telemetry.core import exceptions
 
@@ -27,7 +28,7 @@ params_dict = {
     'tasks': '_tasks',
 }
 
-class power_LoadTest(test.test):
+class power_LoadTest(arc.ArcTest):
     """test class"""
     version = 2
     _username = 'powerloadtest@gmail.com'
@@ -251,11 +252,17 @@ class power_LoadTest(test.test):
 
         ext_path = os.path.join(os.path.dirname(__file__), 'extension')
         self._tmp_keyvals['username'] = self._username
+
+        arc_mode = arc_common.ARC_MODE_DISABLED
+        if utils.is_arc_available():
+            arc_mode = arc_common.ARC_MODE_ENABLED
+
         try:
             self._browser = chrome.Chrome(extension_paths=[ext_path],
                                           gaia_login=self._gaia_login,
                                           username=self._username,
-                                          password=self._password)
+                                          password=self._password,
+                                          arc_mode=arc_mode)
         except exceptions.LoginException:
             # already failed guest login
             if not self._gaia_login:
@@ -447,6 +454,9 @@ class power_LoadTest(test.test):
         self.write_perf_keyval(keyvals)
         self._plog.save_results(self.resultsdir)
         self._tlog.save_results(self.resultsdir)
+        pdash = power_dashboard.PowerLoggerDashboard( \
+                self._plog, self.tagged_testname, self.resultsdir)
+        pdash.upload()
 
 
     def cleanup(self):

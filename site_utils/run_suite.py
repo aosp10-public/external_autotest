@@ -52,6 +52,7 @@ import os
 import re
 import sys
 import time
+import warnings
 
 import common
 from chromite.lib import buildbot_annotations as annotations
@@ -93,6 +94,8 @@ _MIN_RPC_TIMEOUT = 600
 
 # Number of days back to search for existing job.
 _SEARCH_JOB_MAX_DAYS = 14
+
+_PROVISION_SUITE = 'provision'
 
 
 @functools.total_ordering
@@ -290,7 +293,7 @@ def make_parser():
                         help="Create the suite and print the job id, then "
                         "finish immediately.")
     parser.add_argument("-u", "--num", dest="num", type=int, default=None,
-                        help="Run on at most NUM machines.")
+                        help="Deprecated, does nothing.")
     #  Same boolean flag issue applies here.
     parser.add_argument(
         "-f", "--file_bugs", dest="file_bugs", default=False, type=bool_str,
@@ -413,9 +416,9 @@ def verify_and_clean_options(options):
         if not options.name:
             print 'Need to specify suite name'
             return False
-    if options.num is not None and options.num < 1:
-        print 'Number of machines must be more than 0, if specified.'
-        return False
+    if options.num is not None:
+        warnings.warn('-u/--num option is deprecated; it does nothing.')
+    del options.num
     if not options.retry and options.max_retries is not None:
         print 'max_retries can only be used with --retry=True'
         return False
@@ -649,8 +652,8 @@ class LogLink(object):
         """
         return '%s %s' % (self.anchor, self.url)
 
-    def GenerateWmatrixRetryLink(self):
-        """Generate a link to the wmatrix retry dashboard.
+    def GenerateRetryLink(self):
+        """Generate a link to the retry dashboard.
 
         @return A link formatted for the buildbot log annotator.
         """
@@ -660,8 +663,8 @@ class LogLink(object):
             text='[Flake-Dashboard]: %s' % self.testname,
             url=reporting_utils.link_retry_url(self.testname))
 
-    def GenerateWmatrixHistoryLink(self):
-        """Generate a link to the wmatrix test history dashboard.
+    def GenerateHistoryLink(self):
+        """Generate a link to the test history dashboard.
 
         @return A link formatted for the buildbot log annotator.
         """
@@ -875,26 +878,21 @@ class TestView(object):
            prefix from the job name, and append the rest to 'SERVER_JOB'
            or 'CLIENT_JOB' as a prefix. So the names returned by this
            method will look like:
-             'Telemetry Smoothness Measurement_SERVER_JOB'
              'dummy_Pass_SERVER_JOB'
              'dummy_Fail_SERVER_JOB'
 
         3) A test view is of a suite job and its status is ABORT.
            In this case, the view['test_name'] is the child job's name.
            For instance,
-             'lumpy-release/R35-5712.0.0/perf_v2/
-                   Telemetry Smoothness Measurement'
              'lumpy-release/R35-5712.0.0/dummy/dummy_Pass'
              'lumpy-release/R35-5712.0.0/dummy/dummy_Fail'
            The above names will be converted to the following:
-             'Telemetry Smoothness Measurement'
              'dummy_Pass'
              'dummy_Fail'
 
         4) A test view's status is of a suite job and its status is TEST_NA.
            In this case, the view['test_name'] is the NAME field of the control
            file. For instance,
-             'Telemetry Smoothness Measurement'
              'dummy_Pass'
              'dummy_Fail'
            This method will not modify these names.
@@ -1128,12 +1126,12 @@ def log_buildbot_links(log_func, links):
     for link in links:
         for generated_link in link.GenerateBuildbotLinks():
             log_func(generated_link)
-        wmatrix_retry_link = link.GenerateWmatrixRetryLink()
-        if wmatrix_retry_link:
-            log_func(wmatrix_retry_link)
-        wmatrix_history_link = link.GenerateWmatrixHistoryLink()
-        if wmatrix_history_link:
-            log_func(wmatrix_history_link)
+        retry_link = link.GenerateRetryLink()
+        if retry_link:
+            log_func(retry_link)
+        history_link = link.GenerateHistoryLink()
+        if history_link:
+            log_func(history_link)
 
 
 class _ReturnCodeComputer(object):
@@ -1536,10 +1534,13 @@ class ResultCollector(object):
             if test_info:
                 test_info['link_to_logs'] = link.url
                 test_info['sponge_url'] = link.sponge_url
-                # Write the wmatrix link into the dict.
+                # Write the retry dashboard link into the dict.
                 if link in self.buildbot_links and link.testname:
-                    test_info['wmatrix_link'] \
+                    test_info['retry_dashboard_link'] \
                         = reporting_utils.link_retry_url(link.testname)
+                    # Always write the wmatrix link for compatibility.
+                    test_info['wmatrix_link'] \
+                        = reporting_utils.link_wmatrix_retry_url(link.testname)
                 # Write the bug url into the dict.
                 if link.bug_id:
                     test_info['bug_url'] = link.bug_url
@@ -1684,7 +1685,6 @@ def create_suite(afe, options):
         test_source_build=options.test_source_build,
         check_hosts=not options.no_wait,
         pool=options.pool,
-        num=options.num,
         file_bugs=options.file_bugs,
         priority=options.priority,
         suite_args=options.suite_args,
@@ -1764,7 +1764,8 @@ def _run_suite(options):
             logging.exception('Error Message: %s', e)
             return SuiteResult(RETURN_CODES.INFRA_FAILURE,
                                {'return_message': str(e)})
-        except AttributeError:
+        except AttributeError as e:
+            logging.exception('Error Message: %s', e)
             return SuiteResult(RETURN_CODES.INVALID_OPTIONS)
 
     job_timer = diagnosis_utils.JobTimer(
@@ -1870,12 +1871,13 @@ def _handle_job_wait(afe, job_id, options, job_timer, is_real_time):
     TKO = frontend_wrappers.RetryingTKO(server=instance_server,
                                         timeout_min=options.afe_timeout_mins,
                                         delay_sec=options.delay_sec)
-    # TODO(ayatane): It needs to be possible for provision suite to pass
-    # if only a few tests fail.  Otherwise, a single failing test will
-    # be reported as failure even if the suite reports success.
-    if options.name == 'provision':
-        # TODO(ayatane): Creating the suite job requires that suite_args
-        # contains num_required.
+    # TODO(crbug.com/672348): It needs to be possible for provision
+    # suite to pass if only a few tests fail.  Otherwise, a single
+    # failing test will be reported as failure even if the suite reports
+    # success.
+    if options.name == _PROVISION_SUITE:
+        # TODO(crbug.com/672348): Creating the suite job requires that
+        # suite_args contains num_required.
         return_code_function = _ProvisionReturnCodeComputer(
             num_required=options.suite_args['num_required'])
     else:

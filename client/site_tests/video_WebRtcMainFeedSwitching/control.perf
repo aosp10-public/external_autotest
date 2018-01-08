@@ -7,7 +7,7 @@ NAME = "video_WebRtcMainFeedSwitching.perf"
 PURPOSE = """Measure performance when srcObject of video tags are frequently
 swapped"""
 CRITERIA = "Fails if Chrome crashes"
-ATTRIBUTES = "suite:hotrod, suite:bluestreak"
+ATTRIBUTES = "suite:hotrod, suite:bluestreak, suite:bluestreak-perbuild"
 TIME = "MEDIUM"
 TEST_CATEGORY = "Performance"
 TEST_CLASS = "video"
@@ -28,8 +28,8 @@ randomly chosen smaller feed.
 
 The tests use a fake media stream - not a real camera.
 
-The test collects metrics and sends to Chrome Perf Dashboard
-(https://chromeperf.appspot.com/).
+The test collects system metrics during the run. See go/cfm-perf-metrics
+for details about the metrics.
 """
 
 job.run_test(

@@ -37,6 +37,7 @@ import datetime
 import logging
 import os
 import sys
+import warnings
 
 from django.db import connection as db_connection
 from django.db import transaction
@@ -549,11 +550,13 @@ def get_hosts(multiple_labels=(), exclude_only_if_needed_labels=False,
 
     @param multiple_labels: match hosts in all of the labels given.  Should
             be a list of label names.
-    @param exclude_only_if_needed_labels: Exclude hosts with at least one
-            "only_if_needed" label applied.
+    @param exclude_only_if_needed_labels: Deprecated. Raise error if it's True.
     @param include_current_job: Set to True to include ids of currently running
             job and special task.
     """
+    if exclude_only_if_needed_labels:
+        raise error.RPCException('exclude_only_if_needed_labels is deprecated')
+
     hosts = rpc_utils.get_host_query(multiple_labels,
                                      exclude_only_if_needed_labels,
                                      valid_only, filter_data)
@@ -597,6 +600,9 @@ def get_num_hosts(multiple_labels=(), exclude_only_if_needed_labels=False,
 
     @returns The number of matching hosts.
     """
+    if exclude_only_if_needed_labels:
+        raise error.RPCException('exclude_only_if_needed_labels is deprecated')
+
     hosts = rpc_utils.get_host_query(multiple_labels,
                                      exclude_only_if_needed_labels,
                                      valid_only, filter_data)
@@ -809,6 +815,14 @@ def create_job_page_handler(name, priority, control_file, control_type,
 
     @returns The created Job id number.
     """
+    test_args = {}
+    if kwargs.get('args'):
+        # args' format is: ['disable_sysinfo=False', 'fast=True', ...]
+        args = kwargs.get('args')
+        for arg in args:
+            k, v = arg.split('=')[0], arg.split('=')[1]
+            test_args[k] = v
+
     if is_cloning:
         logging.info('Start to clone a new job')
         # When cloning a job, hosts and meta_hosts should not exist together,
@@ -835,9 +849,10 @@ def create_job_page_handler(name, priority, control_file, control_type,
         return create_suite_job(
                 name=name, control_file=control_file, priority=priority,
                 builds=builds, test_source_build=test_source_build,
-                is_cloning=is_cloning, **kwargs)
+                is_cloning=is_cloning, test_args=test_args, **kwargs)
+
     return create_job(name, priority, control_file, control_type, image=image,
-                      hostless=hostless, **kwargs)
+                      hostless=hostless, test_args=test_args, **kwargs)
 
 
 @rpc_utils.route_rpc_to_master
@@ -868,7 +883,7 @@ def create_job(
         test_retry=0,
         run_reset=True,
         require_ssp=None,
-        args=(),
+        test_args=None,
         **kwargs):
     """\
     Create and enqueue a job.
@@ -910,13 +925,13 @@ def create_job(
                        autotest-server package doesn't exist for the build or
                        image is not set, drone will run the test without server-
                        side packaging. Default is None.
-    @param args A list of args to be injected into control file.
+    @param test_args A dict of args passed to be injected into control file.
     @param kwargs extra keyword args. NOT USED.
 
     @returns The created Job id number.
     """
-    if args:
-        control_file = tools.inject_vars({'args': args}, control_file)
+    if test_args:
+        control_file = tools.inject_vars(test_args, control_file)
     if image:
         dependencies += (provision.image_version_to_label(image),)
     return rpc_utils.create_job_common(
@@ -1629,6 +1644,7 @@ def get_static_data():
                                    "Resetting": "Resetting hosts"}
 
     result['wmatrix_url'] = rpc_utils.get_wmatrix_url()
+    result['stainless_url'] = rpc_utils.get_stainless_url()
     result['is_moblab'] = bool(utils.is_moblab())
 
     return result
@@ -1850,12 +1866,9 @@ def create_suite_job(
 
     @return: the job ID of the suite; -1 on error.
     """
-    if type(num) is not int and num is not None:
-        raise error.SuiteArgumentException('Ill specified num argument %r. '
-                                           'Must be an integer or None.' % num)
-    if num == 0:
-        logging.warning("Can't run on 0 hosts; using default.")
-        num = None
+    if num is not None:
+        warnings.warn('num is deprecated for create_suite_job')
+    del num
 
     if builds is None:
         builds = {}
@@ -1934,7 +1947,6 @@ def create_suite_job(
         'check_hosts': check_hosts,
         'pool': pool,
         'child_dependencies': child_dependencies,
-        'num': num,
         'file_bugs': file_bugs,
         'timeout': timeout,
         'timeout_mins': timeout_mins,

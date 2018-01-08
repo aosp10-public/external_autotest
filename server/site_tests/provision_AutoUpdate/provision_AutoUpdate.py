@@ -4,6 +4,7 @@
 
 import logging
 import re
+import sys
 import urllib2
 
 from autotest_lib.client.common_lib import error
@@ -98,8 +99,13 @@ class provision_AutoUpdate(test.test):
             ds = dev_server.ImageServer.resolve(image, host.hostname)
             ds.stage_artifacts(image, ['full_payload', 'stateful',
                                        'autotest_packages'])
+            try:
+                ds.stage_artifacts(image, ['quick_provision'])
+            except dev_server.DevServerException as e:
+                logging.warning('Unable to stage quick provision payload: %s',
+                                e)
         except dev_server.DevServerException as e:
-            raise error.TestFail(str(e))
+            raise error.TestFail, str(e), sys.exc_info()[2]
         finally:
             # If a devserver is resolved, Log what has been downloaded so far.
             if ds:
@@ -121,5 +127,5 @@ class provision_AutoUpdate(test.test):
                     with_cheets=with_cheets)
         except error.InstallError as e:
             logging.error(e)
-            raise error.TestFail(str(e))
+            raise error.TestFail, str(e), sys.exc_info()[2]
         logging.debug('Finished provisioning %s to %s', host, value)

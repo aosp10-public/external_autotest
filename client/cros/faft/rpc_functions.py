@@ -10,6 +10,7 @@ These can be exposed via a xmlrpci server running on the DUT.
 import functools, os, tempfile
 
 from autotest_lib.client.cros.faft.utils import (cgpt_handler,
+                                                 common,
                                                  os_interface,
                                                  firmware_check_keys,
                                                  firmware_updater,
@@ -38,31 +39,6 @@ def allow_multiple_section_input(image_operator):
         else:
             image_operator(self, section)
     return wrapper
-
-
-class LazyInitHandlerProxy:
-    """Proxy of a given handler_class for lazy initialization."""
-    _loaded = False
-    _obj = None
-
-    def __init__(self, handler_class, *args, **kargs):
-        self._handler_class = handler_class
-        self._args = args
-        self._kargs = kargs
-
-    def _load(self):
-        self._obj = self._handler_class()
-        self._obj.init(*self._args, **self._kargs)
-        self._loaded = True
-
-    def __getattr__(self, name):
-        if not self._loaded:
-            self._load()
-        return getattr(self._obj, name)
-
-    def reload(self):
-        """Reload the FlashromHandler class."""
-        self._loaded = False
 
 
 class RPCFunctions(object):
@@ -100,7 +76,7 @@ class RPCFunctions(object):
         self._os_if.init(state_dir, log_file=self._log_file)
         os.chdir(state_dir)
 
-        self._bios_handler = LazyInitHandlerProxy(
+        self._bios_handler = common.LazyInitHandlerProxy(
                 flashrom_handler.FlashromHandler,
                 saft_flashrom_util,
                 self._os_if,
@@ -110,7 +86,7 @@ class RPCFunctions(object):
 
         self._ec_handler = None
         if self._os_if.run_shell_command_get_status('mosys ec info') == 0:
-            self._ec_handler = LazyInitHandlerProxy(
+            self._ec_handler = common.LazyInitHandlerProxy(
                     flashrom_handler.FlashromHandler,
                     saft_flashrom_util,
                     self._os_if,
@@ -125,7 +101,7 @@ class RPCFunctions(object):
                                   dev_key_path='/usr/share/vboot/devkeys',
                                   internal_disk=True)
 
-        self._tpm_handler = LazyInitHandlerProxy(
+        self._tpm_handler = common.LazyInitHandlerProxy(
                 tpm_handler.TpmHandler,
                 self._os_if)
 
@@ -263,6 +239,13 @@ class RPCFunctions(object):
         if lines[-1].strip() == 'Failed':
             raise Exception('Failed getting platform name: ' + '\n'.join(lines))
         return lines[-1]
+
+    def _system_dev_tpm_present(self):
+        """Check if /dev/tpm0 is present.
+
+        @return: Boolean true or false.
+        """
+        return os.path.exists('/dev/tpm0')
 
     def _system_get_crossystem_value(self, key):
         """Get crossystem value of the requested key.
@@ -499,6 +482,11 @@ class RPCFunctions(object):
         """Get SHA1 hash of EC RW firmware section."""
         return self._ec_handler.get_section_sha('rw')
 
+    def _ec_get_active_hash(self):
+        """Get hash of active EC RW firmware."""
+        return self._os_if.run_shell_command_get_output(
+                'ectool echash | grep hash: | sed "s/hash:\s\+//"')[0]
+
     def _ec_dump_whole(self, ec_path):
         """Dump the current EC firmware to a file, specified by ec_path.
 
@@ -562,6 +550,19 @@ class RPCFunctions(object):
             self._ec_handler.enable_write_protect()
         else:
             self._ec_handler.disable_write_protect()
+
+    def _ec_is_efs(self):
+        """Return True if the EC supports EFS."""
+        return self._ec_handler.has_section_body('rw_b')
+
+    def _ec_copy_rw(self, from_section, to_section):
+        """Copy EC RW from from_section to to_section."""
+        self._ec_handler.copy_from_to(from_section, to_section)
+
+    def _ec_reboot_to_switch_slot(self):
+        """Reboot EC to switch the active RW slot."""
+        self._os_if.run_shell_command(
+                'ectool reboot_ec cold switch-slot')
 
     @allow_multiple_section_input
     def _kernel_corrupt_sig(self, section):
@@ -700,12 +701,37 @@ class RPCFunctions(object):
     def _updater_cleanup(self):
         self._updater.cleanup_temp_dir()
 
+    def _updater_stop_daemon(self):
+        """Stop update-engine daemon."""
+        return self._updater.stop_daemon()
+
+    def _updater_start_daemon(self):
+        """Start update-engine daemon."""
+        return self._updater.start_daemon()
+
     def _updater_get_fwid(self):
         """Retrieve shellball's fwid.
 
         @return: Shellball's fwid.
         """
         return self._updater.retrieve_fwid()
+
+    def _updater_get_ecid(self):
+        """Retrieve shellball's ecid.
+
+        @return: Shellball's ecid.
+        """
+        return self._updater.retrieve_ecid()
+
+    def _updater_modify_ecid_and_flash_to_bios(self):
+        """Modify ecid, put it to AP firmware, and flash it to the system."""
+        self._updater.modify_ecid_and_flash_to_bios()
+
+    def _updater_get_ec_hash(self):
+        """Return the hex string of the EC hash."""
+        blob = self._updater.retrieve_ec_hash()
+        # Format it to a hex string
+        return ''.join('%02x' % ord(c) for c in blob)
 
     def _updater_resign_firmware(self, version):
         """Resign firmware with version.

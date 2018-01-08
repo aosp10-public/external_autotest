@@ -7,7 +7,6 @@ import os
 import random
 import shutil
 import tempfile
-import time
 import unittest
 from contextlib import contextmanager
 
@@ -16,6 +15,7 @@ from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error
 from autotest_lib.site_utils import lxc
 from autotest_lib.site_utils.lxc import constants
+from autotest_lib.site_utils.lxc import container as container_module
 from autotest_lib.site_utils.lxc import unittest_http
 from autotest_lib.site_utils.lxc import unittest_setup
 from autotest_lib.site_utils.lxc import utils as lxc_utils
@@ -72,6 +72,23 @@ class ContainerTests(unittest.TestCase):
                                                                name)
             with self.assertRaises(error.ContainerError):
                 container.refresh_status()
+
+
+    def testInvalidId(self):
+        """Verifies that corrupted ID files do not raise exceptions."""
+        with self.createContainer() as container:
+            # Create a container with an empty ID file.
+            id_path = os.path.join(container.container_path,
+                                   container.name,
+                                   container_module._CONTAINER_ID_FILENAME)
+            utils.run('sudo touch %s' % id_path)
+            try:
+                # Verify that container creation doesn't raise exceptions.
+                test_container = lxc.Container.create_from_existing_dir(
+                        self.test_dir, container.name)
+                self.assertIsNone(test_container.id)
+            except Exception:
+                self.fail('Unexpected exception:\n%s' % error.format_error())
 
 
     def testDefaultHostname(self):
@@ -364,7 +381,7 @@ class ContainerIdTests(unittest.TestCase):
 
 def random_container_id():
     """Generate a random container ID for testing."""
-    return lxc.ContainerId(random.randint(0, 1000), time.time(), os.getpid())
+    return lxc.ContainerId.create(random.randint(0, 1000))
 
 
 if __name__ == '__main__':

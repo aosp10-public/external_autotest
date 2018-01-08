@@ -141,19 +141,51 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(pool.errors.qsize(), status['pool errors'])
 
 
+    def testGet(self):
+        """Tests getting a container from the pool."""
+        test_pool = MockPool()
+        fake_container = MockContainer()
+        test_id = lxc.ContainerId.create(42)
+        test_pool.containers.put(fake_container)
+
+        with self.run_service(test_pool):
+            with self.create_client() as client:
+                client.send(message.get(test_id))
+                test_container = client.recv()
+                self.assertEqual(test_id, test_container.id)
+
+
+    def testGet_timeoutImmediate(self):
+        """Tests getting a container with timeouts."""
+        test_id = lxc.ContainerId.create(42)
+        with self.run_service():
+            with self.create_client() as client:
+                client.send(message.get(test_id))
+                test_container = client.recv()
+                self.assertIsNone(test_container)
+
+
+    def testGet_timeoutDelayed(self):
+        """Tests getting a container with timeouts."""
+        test_id = lxc.ContainerId.create(42)
+        with self.run_service():
+            with self.create_client() as client:
+                client.send(message.get(test_id, timeout=1))
+                test_container = client.recv()
+                self.assertIsNone(test_container)
+
+
     def testMultipleClients(self):
         """Tests multiple simultaneous connections."""
         with self.run_service():
             with self.create_client() as client0:
                 with self.create_client() as client1:
 
-                    msg0 = message.echo(
-                        msg='two driven jocks help fax my big quiz')
-                    msg1 = message.echo(
-                        msg='how quickly daft jumping zebras vex')
+                    msg0 = 'two driven jocks help fax my big quiz'
+                    msg1 = 'how quickly daft jumping zebras vex'
 
-                    client0.send(msg0)
-                    client1.send(msg1)
+                    client0.send(message.echo(msg0))
+                    client1.send(message.echo(msg1))
 
                     echo0 = client0.recv()
                     echo1 = client1.recv()
@@ -171,8 +203,8 @@ class ServiceTests(unittest.TestCase):
         cleanly.  Use Service.is_running to check that.
         """
         with self.create_client() as client:
-            msg = message.echo(msg='foobar')
-            client.send(msg)
+            msg = 'foobar'
+            client.send(message.echo(msg))
             return client.recv() == msg
 
 
@@ -210,10 +242,32 @@ class MockPool(object):
         self.size = 0
         self.worker_count = 0
         self.errors = Queue.Queue()
+        self.containers = Queue.Queue()
+
 
     def cleanup(self):
         """Required by pool interface.  Does nothing."""
         pass
+
+
+    def get(self, timeout=0):
+        """Required by pool interface.
+
+        @return: A pool from the containers queue.
+        """
+        try:
+            return self.containers.get(block=(timeout > 0), timeout=timeout)
+        except Queue.Empty:
+            return None
+
+
+class MockContainer(object):
+    """A mock container class for testing the service."""
+
+    def __init__(self):
+        """Initializes a mock container."""
+        self.id = None
+        self.name = 'test_container'
 
 
 if __name__ == '__main__':

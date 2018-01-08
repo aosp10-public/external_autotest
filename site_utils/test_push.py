@@ -42,12 +42,12 @@ except ImportError:
 from autotest_lib.client.common_lib import global_config
 from autotest_lib.client.common_lib import priorities
 from autotest_lib.client.common_lib.cros import retry
+from autotest_lib.server import constants
 from autotest_lib.server import site_utils
 from autotest_lib.server import utils
 from autotest_lib.server.cros import provision
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 from autotest_lib.site_utils import gmail_lib
-from autotest_lib.site_utils.suite_scheduler import constants
 
 try:
     from chromite.lib import metrics
@@ -75,7 +75,11 @@ DEFAULT_EMAIL = CONFIG.get_config_value(
         'SCHEDULER', 'notify_email', type=list, default=[])
 # TODO(crbug.com/767302): Bump up tesbed requirement back to 1 when we
 # re-enable testbed tests.
-DEFAULT_NUM_DUTS = "{'gandof': 4, 'quawks': 2, 'testbed': 0}"
+DEFAULT_NUM_DUTS = (
+        ('gandof', 4),
+        ('quawks', 2),
+        ('testbed', 0),
+)
 
 SUITE_JOB_START_INFO_REGEX = ('^.*Created suite job:.*'
                               'tab_id=view_job&object_id=(\d+)$')
@@ -125,10 +129,12 @@ IGNORE_MISSING_TESTS = [
     # TODO(dshi): Remove following lines after R41 is stable.
     'login_LoginSuccess']
 
-# Save all run_suite command output.
-manager = multiprocessing.Manager()
-run_suite_output = manager.list()
-all_suite_ids = manager.list()
+# Multiprocessing proxy objects that are used to share data between background
+# suite-running processes and main process. The multiprocessing-compatible
+# versions are initialized in _main.
+_run_suite_output = []
+_all_suite_ids = []
+
 # A dict maps the name of the updated repos and the path of them.
 UPDATED_REPOS = {'autotest': AUTOTEST_DIR,
                  'chromite': '%s/site-packages/chromite/' % AUTOTEST_DIR}
@@ -137,7 +143,6 @@ PUSH_USER = 'chromeos-test-lab'
 class TestPushException(Exception):
     """Exception to be raised when the test to push to prod failed."""
     pass
-
 
 @retry.retry(TestPushException, timeout_min=5, delay_sec=30)
 def check_dut_inventory(required_num_duts, pool):
@@ -243,8 +248,6 @@ def parse_arguments():
     parser.add_argument('-ai', '--android_build', dest='android_build',
                         help='Android build to test.')
     parser.add_argument('-p', '--pool', dest='pool', default='bvt')
-    parser.add_argument('-u', '--num', dest='num', type=int, default=3,
-                        help='Run on at most NUM machines.')
     parser.add_argument('-e', '--email', nargs='+', dest='email',
                         default=DEFAULT_EMAIL,
                         help='Email address for the notification to be sent to '
@@ -255,9 +258,10 @@ def parse_arguments():
                              'are waiting on. Only for the asynchronous suites '
                              'triggered by create_and_return flag.')
     parser.add_argument('-ud', '--num_duts', dest='num_duts',
-                        default=DEFAULT_NUM_DUTS,
-                        help="String of dict that indicates the required number"
-                             " of DUTs for each board. E.g {'gandof':4}")
+                        default=dict(DEFAULT_NUM_DUTS),
+                        type=ast.literal_eval,
+                        help="Python dict literal that specifies the required"
+                        " number of DUTs for each board. E.g {'gandof':4}")
     parser.add_argument('-c', '--continue_on_failure', action='store_true',
                         dest='continue_on_failure',
                         help='All tests continue to run when there is failure')
@@ -270,8 +274,6 @@ def parse_arguments():
     if not arguments.shard_build:
         arguments.shard_build = get_default_build(arguments.shard_board,
                                                   arguments.web)
-
-    arguments.num_duts = ast.literal_eval(arguments.num_duts)
 
     return arguments
 
@@ -324,7 +326,7 @@ def do_run_suite(suite_name, arguments, use_shard=False,
            '-b', board,
            '-i', build,
            '-p', arguments.pool,
-           '-u', str(arguments.num)]
+           '--minimum_duts', str(arguments.num_duts[board])]
     if create_and_return:
         cmd += ['-c']
     if testbed_test:
@@ -342,13 +344,13 @@ def do_run_suite(suite_name, arguments, use_shard=False,
         if not line and proc.poll() != None:
             break
         print line.rstrip()
-        run_suite_output.append(line.rstrip())
+        _run_suite_output.append(line.rstrip())
 
         if not suite_job_id:
             m = re.match(SUITE_JOB_START_INFO_REGEX, line)
             if m and m.group(1):
                 suite_job_id = int(m.group(1))
-                all_suite_ids.append(suite_job_id)
+                _all_suite_ids.append(suite_job_id)
 
     if not suite_job_id:
         raise TestPushException('Failed to retrieve suite job ID.')
@@ -505,7 +507,7 @@ def test_suite_wrapper(queue, suite_name, expected_results, arguments,
     try:
         test_suite(suite_name, expected_results, arguments, use_shard,
                    create_and_return, testbed_test)
-    except:
+    except Exception:
         # Store the whole exc_info leads to a PicklingError.
         except_type, except_value, tb = sys.exc_info()
         queue.put((except_type, except_value, traceback.extract_tb(tb)))
@@ -593,6 +595,14 @@ def _main(arguments):
 
     @param arguments: command line arguments.
     """
+
+    # TODO Use chromite.lib.parallel.Manager instead, to workaround the
+    # too-long-tmp-path problem.
+    mpmanager = multiprocessing.Manager()
+
+    _run_suite_output = mpmanager.list()
+    _all_suite_ids = mpmanager.list()
+
     updated_repo_heads = get_head_of_repos(UPDATED_REPOS)
     updated_repo_msg = '\n'.join(
         ['%s: %s' % (k, v) for k, v in updated_repo_heads.iteritems()])
@@ -640,7 +650,7 @@ def _main(arguments):
         print str(e)
         # Abort running jobs when choose not to continue when there is failure.
         if not arguments.continue_on_failure:
-            for suite_id in all_suite_ids:
+            for suite_id in _all_suite_ids:
                 if AFE.get_jobs(id=suite_id, finished=False):
                     AFE.run('abort_host_queue_entries', job=suite_id)
         # Send out email about the test failure.
@@ -656,7 +666,7 @@ def _main(arguments):
                      'Stats on recent success rate can be found at '
                      'go/test-push-stats . Detailed '
                      'debugging info can be found at go/push-to-prod' %
-                     (updated_repo_msg, str(e)) + '\n'.join(run_suite_output)))
+                     (updated_repo_msg, str(e)) + '\n'.join(_run_suite_output)))
         raise
     finally:
         metrics.Counter('chromeos/autotest/test_push/completed').increment(

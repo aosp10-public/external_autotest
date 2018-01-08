@@ -24,9 +24,9 @@ _CTS_TIMEOUT_SECONDS = 3600
 # Public download locations for android cts bundles.
 _DL_CTS = 'https://dl.google.com/dl/android/cts/'
 _CTS_URI = {
-    'arm': _DL_CTS + 'android-cts-7.1_r11-linux_x86-arm.zip',
-    'x86': _DL_CTS + 'android-cts-7.1_r11-linux_x86-x86.zip',
-    'media': _DL_CTS + 'android-cts-media-1.3.zip',
+    'arm': _DL_CTS + 'android-cts-7.1_r12-linux_x86-arm.zip',
+    'x86': _DL_CTS + 'android-cts-7.1_r12-linux_x86-x86.zip',
+    'media': _DL_CTS + 'android-cts-media-1.4.zip',
 }
 
 
@@ -34,7 +34,8 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
     """Sets up tradefed to run CTS tests."""
     version = 1
 
-    _BOARD_RETRY = {'betty': 0}
+    # TODO(bmgordon): Remove kahlee once the bulk of failing tests are fixed.
+    _BOARD_RETRY = {'betty': 0, 'kahlee': 0}
     _CHANNEL_RETRY = {'dev': 5, 'beta': 5, 'stable': 5}
 
     def _get_default_bundle_url(self, bundle):
@@ -150,8 +151,7 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
         # newbie and novato are x86 VMs without binary translation. Skip the ARM
         # tests.
         no_ARM_ABI_test_boards = ('newbie', 'novato', 'novato-arc64')
-        board = self._host.get_board().split(':')[1] # Remove 'board:' prefix.
-        if board in no_ARM_ABI_test_boards:
+        if self._get_board_name(self._host) in no_ARM_ABI_test_boards:
             if self._abi == 'arm':
                 return True
         return False
@@ -200,7 +200,6 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
                  target_class=None,
                  target_method=None,
                  needs_push_media=False,
-                 retry_manual_tests=False,
                  cts_tradefed_args=None,
                  precondition_commands=[],
                  login_precondition_commands=[],
@@ -220,9 +219,6 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
         @param target_class: the name of the class to be tested.
         @param target_method: the name of the method to be tested.
         @param needs_push_media: need to push test media streams.
-        @param retry_manual_tests: a flag to track whether manual tests
-                need to be retried or not. Autotest lab skips manual tests,
-                while moblab runs them.
         @param timeout: time after which tradefed can be interrupted.
         @param precondition_commands: a list of scripts to be run on the
         dut before the test is run, the scripts must already be installed.
@@ -238,11 +234,6 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
         # Retries depend on channel.
         self._timeoutfactor = None
 
-        # TODO(kinaba): Move this logic to tradefed_test so that cheets_GTS can
-        # deal with manual tests.
-        if not retry_manual_tests:
-            self._waivers.update(self._manual_tests)
-
         test_command, test_name = self.generate_test_command(target_module,
                                                              target_plan,
                                                              target_class,
@@ -253,4 +244,3 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
                                         target_plan, needs_push_media, _CTS_URI,
                                         login_precondition_commands,
                                         precondition_commands)
-

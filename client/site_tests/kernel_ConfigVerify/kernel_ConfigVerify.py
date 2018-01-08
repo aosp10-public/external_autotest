@@ -71,6 +71,11 @@ class kernel_ConfigVerify(test.test):
         'KALLSYMS_ALL',
         # bpf(2) syscall can be used to generate code patterns in kernel memory.
         'BPF_SYSCALL',
+        # This callback can be subverted to point to arbitrary programs.  We
+        # require firmware to be in the rootfs at normal locations which lets
+        # the kernel locate things itself.
+        'FW_LOADER_USER_HELPER',
+        'FW_LOADER_USER_HELPER_FALLBACK',
     ]
     IS_EXCLUSIVE = [
         # Security; no surprise binary formats.
@@ -207,16 +212,15 @@ class kernel_ConfigVerify(test.test):
                 config.has_builtin('X86_64')
 
         # Security; marks data segments as RO/NX, text as RO.
-        if (arch == 'armv7l' and
-            utils.compare_versions(kernel_ver, "3.8") < 0):
-            config.is_missing('DEBUG_RODATA')
-            config.is_missing('DEBUG_SET_MODULE_RONX')
-        else:
+        if utils.compare_versions(kernel_ver, "4.11") < 0:
             config.has_builtin('DEBUG_RODATA')
             config.has_builtin('DEBUG_SET_MODULE_RONX')
+        else:
+            config.has_builtin('STRICT_KERNEL_RWX')
+            config.has_builtin('STRICT_MODULE_RWX')
 
-            if arch == 'aarch64':
-                config.has_builtin('DEBUG_ALIGN_RODATA')
+        if arch == 'aarch64':
+            config.has_builtin('DEBUG_ALIGN_RODATA')
 
         # NaCl; allow mprotect+PROT_EXEC on noexec mapped files.
         config.has_value('MMAP_NOEXEC_TAINT', ['0'])

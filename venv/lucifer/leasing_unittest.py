@@ -6,9 +6,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import contextlib
 import logging
 import os
+import signal
 import socket
 import sys
 
@@ -24,71 +26,62 @@ logger = logging.getLogger(__name__)
 _THE_END = 253370764800
 
 
+def test_obtain_lease(tmpdir):
+    """Test obtain_lease.
+
+    Provides basic test coverage metrics.  The slower subprocess tests
+    provide better functional coverage.
+    """
+    path = _make_lease(tmpdir, 124)
+    with leasing.obtain_lease(path):
+        pass
+    assert not os.path.exists(path)
+
+
 @pytest.mark.slow
-def test_get_expired_leases(tmpdir, end_time):
+def test_obtain_lease_succesfully_removes_file(tmpdir):
+    """Test obtain_lease cleans up lease file if successful."""
+    path = _make_lease(tmpdir, 124)
+    with _obtain_lease(path) as lease_proc:
+        lease_proc.finish()
+    assert not os.path.exists(path)
+
+
+@pytest.mark.slow
+def test_obtain_lease_with_error_removes_files(tmpdir):
+    """Test obtain_lease removes file if it errors."""
+    path = _make_lease(tmpdir, 124)
+    with _obtain_lease(path) as lease_proc:
+        lease_proc.proc.send_signal(signal.SIGINT)
+        lease_proc.proc.wait()
+    assert not os.path.exists(path)
+
+
+@pytest.mark.slow
+def test_Lease__expired(tmpdir, end_time):
     """Test get_expired_leases()."""
     _make_lease(tmpdir, 123)
-    with _make_locked_lease(tmpdir, 124):
-        got = list(leasing.get_expired_leases(str(tmpdir)))
-
-    assert all(isinstance(job, leasing.Lease) for job in got)
-    # Locked lease should not be returned
-    assert [job.id for job in got] == [123]
+    path = _make_lease(tmpdir, 124)
+    with _obtain_lease(path):
+        leases = _leases_dict(str(tmpdir))
+        assert leases[123].expired()
+        assert not leases[124].expired()
 
 
 def test_unlocked_fresh_leases_are_not_expired(tmpdir):
     """Test get_expired_leases()."""
     path = _make_lease(tmpdir, 123)
     os.utime(path, (_THE_END, _THE_END))
-    got = list(leasing.get_expired_leases(str(tmpdir)))
-    assert len(got) == 0
+    leases = _leases_dict(str(tmpdir))
+    assert not leases[123].expired()
 
 
-def test_get_expired_leases_with_sock_files(tmpdir, end_time):
-    """Test get_expired_leases()."""
+def test_leases_iter_with_sock_files(tmpdir):
+    """Test leases_iter() ignores sock files."""
     _make_lease(tmpdir, 123)
     tmpdir.join('124.sock').write('')
-    got = list(leasing.get_expired_leases(str(tmpdir)))
-
-    assert all(isinstance(job, leasing.Lease) for job in got)
-    # Abort socket should be ignored
-    assert [job.id for job in got] == [123]
-
-
-def test_get_timed_out_leases(tmpdir):
-    """Test get_timed_out_leases()."""
-    mock_model = mock.Mock()
-    (
-            mock_model.objects
-            .filter()
-            .extra()
-            .distinct
-    ).return_value = [_StubJob(122), _StubJob(123)]
-    _make_lease(tmpdir, 123)
-    _make_lease(tmpdir, 124)
-    got = list(leasing.get_timed_out_leases(mock_model, str(tmpdir)))
-
-    assert all(isinstance(job, leasing.Lease) for job in got)
-    assert 123 in [job.id for job in got]
-    assert 124 not in [job.id for job in got]
-
-
-def test_get_marked_aborting_leases(tmpdir):
-    """Test get_marked_aborting_leases()."""
-    mock_model = mock.Mock()
-    (
-            mock_model.objects
-            .filter()
-            .filter()
-            .distinct
-    ).return_value = [_StubJob(122), _StubJob(123)]
-    _make_lease(tmpdir, 123)
-    _make_lease(tmpdir, 124)
-    got = list(leasing.get_marked_aborting_leases(mock_model, str(tmpdir)))
-
-    assert all(isinstance(job, leasing.Lease) for job in got)
-    assert 123 in [job.id for job in got]
-    assert 124 not in [job.id for job in got]
+    leases = _leases_dict(str(tmpdir))
+    assert 124 not in leases
 
 
 def test_Job_cleanup(tmpdir):
@@ -148,36 +141,34 @@ def end_time():
         yield t
 
 
-@contextlib.contextmanager
-def _make_locked_lease(tmpdir, job_id):
-    """Make a locked lease file.
-
-    As a context manager, returns the path to the lease file when
-    entering.
-
-    This uses a slow subprocess; any test that uses this should be
-    marked slow.
-    """
-    path = _make_lease(tmpdir, job_id)
-    with _lock_lease(path):
-        yield path
+_LeaseProc = collections.namedtuple('_LeaseProc', 'finish proc')
 
 
 @contextlib.contextmanager
-def _lock_lease(path):
+def _obtain_lease(path):
     """Lock a lease file.
+
+    Yields a _LeaseProc.  finish is a function that can be called to
+    finish the process normally.  proc is a Popen instance.
 
     This uses a slow subprocess; any test that uses this should be
     marked slow.
     """
     with subprocess32.Popen(
             [sys.executable, '-um',
-             'lucifer.cmd.test.fcntl_lock', path],
+             'lucifer.cmd.test.obtain_lease', path],
+            stdin=subprocess32.PIPE,
             stdout=subprocess32.PIPE) as proc:
         # Wait for lock grab.
         proc.stdout.readline()
+
+        def finish():
+            """Finish lease process normally."""
+            proc.stdin.write('\n')
+            # Wait for lease release.
+            proc.stdout.readline()
         try:
-            yield
+            yield _LeaseProc(finish, proc)
         finally:
             proc.terminate()
 
@@ -206,6 +197,12 @@ def _abort_socket(tmpdir, job_id):
             proc.terminate()
 
 
+def _leases_dict(jobdir):
+    """Convenience method for tests."""
+    return {lease.id: lease for lease
+            in leasing.leases_iter(jobdir)}
+
+
 def _make_lease(tmpdir, job_id):
     return _make_lease_file(str(tmpdir), job_id)
 
@@ -222,8 +219,5 @@ def _make_lease_file(jobdir, job_id):
     return path
 
 
-class _StubJob(object):
-    """Stub for Django Job model."""
-
-    def __init__(self, job_id):
-        self.id = job_id
+class _TestError(Exception):
+    """Error for tests."""

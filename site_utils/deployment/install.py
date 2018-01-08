@@ -68,6 +68,7 @@ from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib import host_states
 from autotest_lib.client.common_lib import time_utils
 from autotest_lib.client.common_lib import utils
+from autotest_lib.server import constants
 from autotest_lib.server import frontend
 from autotest_lib.server import hosts
 from autotest_lib.server.cros.dynamic_suite.constants import VERSION_PREFIX
@@ -75,12 +76,11 @@ from autotest_lib.server.hosts import afe_store
 from autotest_lib.server.hosts import servo_host
 from autotest_lib.site_utils.deployment import commandline
 from autotest_lib.site_utils.stable_images import assign_stable_images
-from autotest_lib.site_utils.suite_scheduler.constants import Labels
 
 
 _LOG_FORMAT = '%(asctime)s | %(levelname)-10s | %(message)s'
 
-_DEFAULT_POOL = Labels.POOL_PREFIX + 'suites'
+_DEFAULT_POOL = constants.Labels.POOL_PREFIX + 'suites'
 
 _DIVIDER = '\n============\n'
 
@@ -369,7 +369,7 @@ def _get_afe_host(afe, hostname, arguments, host_attr_dict):
         afe_host = afe.create_host(hostname,
                                    locked=True,
                                    lock_reason=_LOCK_REASON_NEW_HOST)
-        afe_host.add_labels([Labels.BOARD_PREFIX + arguments.board])
+        afe_host.add_labels([constants.Labels.BOARD_PREFIX + arguments.board])
 
     _update_host_attributes(afe, hostname, host_attr_dict)
     afe_host = afe.get_hosts([hostname])[0]
@@ -578,7 +578,7 @@ def _report_results(afe, report_log, hostnames, results):
         afe.reverify_hosts(hostnames=successful_hosts)
         for h in afe.get_hosts(hostnames=successful_hosts):
             for label in h.labels:
-                if label.startswith(Labels.POOL_PREFIX):
+                if label.startswith(constants.Labels.POOL_PREFIX):
                     result = _ReportResult(h.hostname,
                                            'Host already in %s' % label)
                     success_reports.append(result)

@@ -4,9 +4,8 @@
 
 import logging
 import os
-from autotest_lib.client.bin import test
+from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error
-from autotest_lib.client.common_lib import utils
 from autotest_lib.client.cros import service_stopper
 from autotest_lib.client.cros.graphics import graphics_utils
 
@@ -45,6 +44,9 @@ class DrmTest(object):
         """Indicate if the test should be run on current configuration."""
         supported_apis = graphics_utils.GraphicsApiHelper().get_supported_apis()
         num_displays = graphics_utils.get_num_outputs_on()
+        gpu_type = utils.get_gpu_family()
+        soc = utils.get_cpu_soc_family()
+        kernel_version = os.uname()[2]
         if num_displays == 0 and self._opts['display_required']:
             # If a test needs a display and we don't have a display,
             # consider it a pass.
@@ -57,12 +59,21 @@ class DrmTest(object):
                             'available on system. Skipping test.')
             return False
         if self._opts['min_kernel_version']:
-            kernel_version = os.uname()[2]
             min_kernel_version = self._opts['min_kernel_version']
             if utils.compare_versions(kernel_version, min_kernel_version) < 0:
                 logging.warning('Test requires kernel version >= %s,'
                                 'have version %s. Skipping test.'
                                 % (min_kernel_version, kernel_version))
+                return False
+        if self.name == 'atomictest' and gpu_type == 'baytrail':
+            logging.warning('Baytrail is on kernel v4.4, but there is no '
+                            'intention to enable atomic.')
+            return False
+        if (self.name == 'vgem_test' and
+           (soc == 'rockchip' or soc == 'tegra' or soc == 'mediatek')):
+            if utils.compare_versions(kernel_version, '4.4') < 0:
+                logging.warning('Some ARM SoCs have issues with the vgem_test '
+                                'and we are not going to fix them.')
                 return False
         return True
 
@@ -104,7 +115,6 @@ drm_tests = {
         DrmTest('atomictest', 'atomictest -t all', min_kernel_version='4.4',
                 timeout=300),
         DrmTest('drm_cursor_test'),
-        DrmTest('gamma_test'),
         DrmTest('linear_bo_test'),
         DrmTest('mmap_test', timeout=300),
         DrmTest('null_platform_test'),
@@ -132,23 +142,27 @@ class graphics_Drm(graphics_utils.GraphicsTest):
     # graphics_Drm runs all available tests if tests = None.
     def run_once(self, tests=None, perf_report=False):
         self._test_failure_report_enable = perf_report
+        self._test_failure_report_subtest = perf_report
         for test in drm_tests.itervalues():
             if tests and test.name not in tests:
                 continue
 
             logging.info('-----------------[%s]-----------------' % test.name)
+            self.add_failures(test.name, subtest=test.name)
+            passed = False
             if test.should_run():
                 if test.can_run():
                     logging.debug('Running test %s.', test.name)
                     passed = test.run()
-                    if not passed:
-                        self.add_failures(test.name)
                 else:
-                    logging.info('Failed: test %s can not be run on current '
-                                 'configurations.' % test.name)
-                    self.add_failures(test.name)
+                    logging.info('Failed: test %s can not be run on current'
+                                 ' configurations.' % test.name)
             else:
+                passed = True
                 logging.info('Skipping test: %s.' % test.name)
+
+            if passed:
+                self.remove_failures(test.name, subtest=test.name)
 
         if self.get_failures():
             raise error.TestFail('Failed: %s' % self.get_failures())

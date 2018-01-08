@@ -287,7 +287,7 @@ def service_status(service_name):
 
     @raises subprocess.CalledProcessError on a command failure.
     """
-    return subprocess.check_output(['sudo', 'status', service_name])
+    return subprocess.check_output(['sudo', 'service', service_name, 'status'])
 
 
 def restart_services(service_names, dryrun=False, skip_service_status=False):
@@ -460,6 +460,9 @@ def parse_arguments(args):
         results.update = False
         results.force_clean_externals = False
 
+    if not results.update_push_servers:
+      print('Will skip service check for pushing servers in prod.')
+      results.skip_service_status = True
     return results
 
 

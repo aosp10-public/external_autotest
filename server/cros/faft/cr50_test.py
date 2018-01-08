@@ -174,7 +174,7 @@ class Cr50Test(FirmwareTest):
     def _rootfs_verification_is_disabled(self):
         """Returns true if rootfs verification is enabled"""
         # Clear the TPM owner before trying to check rootfs verification
-        tpm_utils.ClearTPMOwnerRequest(self.host)
+        tpm_utils.ClearTPMOwnerRequest(self.host, wait_for_ready=True)
         self.rootfs_tool = debugd_dev_tools.RootfsVerificationTool()
         self.rootfs_tool.initialize(self.host)
         # rootfs_tool.is_enabled is True, that means rootfs verification is
@@ -202,8 +202,6 @@ class Cr50Test(FirmwareTest):
 
         # Set the RLZ code
         cr50_utils.SetRLZ(self.host, self._original_state['rlz'])
-        # Make sure the /var/cache/cr50* state is restored
-        cr50_utils.ClearUpdateStateAndReboot(self.host)
 
         # Verify everything is still the same
         self._check_original_state()
@@ -243,6 +241,9 @@ class Cr50Test(FirmwareTest):
             logging.warning('Did not save the original state. Cannot verify it '
                             'matches')
             return
+        # Make sure the /var/cache/cr50* state is up to date.
+        cr50_utils.ClearUpdateStateAndReboot(self.host)
+
         mismatch = {}
         new_state = self.get_cr50_device_state()
 
