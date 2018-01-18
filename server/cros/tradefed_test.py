@@ -265,11 +265,11 @@ def lock(filename):
     attempts = 0
     while not filelock.i_am_locking():
         try:
+            attempts += 1
             logging.info('Waiting for cache lock...')
             # We must not use a random integer as the filelock implementations
             # may underflow an integer division.
             filelock.acquire(random.uniform(0.0, pow(2.0, attempts)))
-            attempts += 1
         except (lockfile.AlreadyLocked, lockfile.LockTimeout):
             # Our goal is to wait long enough to be sure something very bad
             # happened to the locking thread. 11 attempts is between 15 and
@@ -1249,11 +1249,22 @@ class TradefedTest(test.test):
                 shutil.rmtree(path)
             self._safe_makedirs(path)
 
-    def _install_plan(self, plan):
-        logging.info('Install plan: %s', plan)
-        plans_dir = os.path.join(self._repository, 'repository', 'plans')
-        src_plan_file = os.path.join(self.bindir, 'plans', '%s.xml' % plan)
-        shutil.copy(src_plan_file, plans_dir)
+    def _install_plan(self, subplan):
+        """Copy test subplan to CTS-TF.
+
+        @param subplan: CTS subplan to be copied into TF.
+        """
+        logging.info('Install subplan: %s', subplan)
+        subplans_tf_dir = os.path.join(self._repository, 'subplans')
+        if not os.path.exists(subplans_tf_dir):
+            os.makedirs(subplans_tf_dir)
+        test_subplan_file = os.path.join(self.bindir, 'subplans', '%s.xml' % subplan)
+        try:
+            shutil.copy(test_subplan_file, subplans_tf_dir)
+        except (shutil.Error, OSError, IOError) as e:
+            raise error.TestFail(
+                   'Error: failed to copy test subplan %s to CTS bundle. %s' %
+                    test_subplan_file, e)
 
     def _should_skip_test(self):
         """Some tests are expected to fail and are skipped.

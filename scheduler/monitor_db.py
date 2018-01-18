@@ -543,7 +543,7 @@ class Dispatcher(object):
                 + self._get_special_task_agent_tasks(is_active=True))
 
 
-    def _get_queue_entry_agent_tasks(self, to_schedule=False):
+    def _get_queue_entry_agent_tasks(self):
         """
         Get agent tasks for all hqe in the specified states.
 
@@ -553,24 +553,17 @@ class Dispatcher(object):
         one agent task at a time, but there might be multiple queue entries in
         the group.
 
-        @param to_schedule: Whether to get agent tasks for scheduling
         @return: A list of AgentTasks.
         """
-        if to_schedule:
-            # TODO(crbug.com/748234): This is temporary to enable
-            # toggling lucifer rollouts with an option.
-            if luciferlib.is_enabled_for('GATHERING'):
-                statuses = (models.HostQueueEntry.Status.STARTING,
-                            models.HostQueueEntry.Status.RUNNING)
-            elif luciferlib.is_enabled_for('PARSING'):
-                statuses = (models.HostQueueEntry.Status.STARTING,
-                            models.HostQueueEntry.Status.RUNNING,
-                            models.HostQueueEntry.Status.GATHERING)
-            else:
-                statuses = (models.HostQueueEntry.Status.STARTING,
-                            models.HostQueueEntry.Status.RUNNING,
-                            models.HostQueueEntry.Status.GATHERING,
-                            models.HostQueueEntry.Status.PARSING)
+        # TODO(crbug.com/748234): This is temporary to enable
+        # toggling lucifer rollouts with an option.
+        if luciferlib.is_enabled_for('GATHERING'):
+            statuses = (models.HostQueueEntry.Status.STARTING,
+                        models.HostQueueEntry.Status.RUNNING)
+        elif luciferlib.is_enabled_for('PARSING'):
+            statuses = (models.HostQueueEntry.Status.STARTING,
+                        models.HostQueueEntry.Status.RUNNING,
+                        models.HostQueueEntry.Status.GATHERING)
         else:
             # host queue entry statuses handled directly by AgentTasks
             # (Verifying is handled through SpecialTasks, so is not
@@ -978,14 +971,34 @@ class Dispatcher(object):
         # lucifer rollouts with an option.
         if luciferlib.is_enabled_for('GATHERING'):
             self._send_gathering_to_lucifer()
-        else:
-            self._send_parsing_to_lucifer()
+        self._send_parsing_to_lucifer()
 
 
     # TODO(crbug.com/748234): This is temporary to enable toggling
     # lucifer rollouts with an option.
     def _send_gathering_to_lucifer(self):
-        raise NotImplementedError
+        Status = models.HostQueueEntry.Status
+        queue_entries_qs = (models.HostQueueEntry.objects
+                            .filter(status=Status.GATHERING))
+        for queue_entry in queue_entries_qs:
+            # If this HQE already has an agent, let monitor_db continue
+            # owning it.
+            if self.get_agents_for_entry(queue_entry):
+                continue
+
+            job = queue_entry.job
+            if luciferlib.is_lucifer_owned(job):
+                continue
+            task = postjob_task.PostJobTask(
+                    [queue_entry], log_file_name='/dev/null')
+            pidfile_id = task._autoserv_monitor.pidfile_id
+            autoserv_exit = task._autoserv_monitor.exit_code()
+            luciferlib.spawn_gathering_job_handler(
+                    manager=_drone_manager,
+                    job=job,
+                    autoserv_exit=autoserv_exit,
+                    pidfile_id=pidfile_id)
+            models.JobHandoff.objects.create(job=job)
 
 
     # TODO(crbug.com/748234): This is temporary to enable toggling
@@ -1007,7 +1020,7 @@ class Dispatcher(object):
                     [queue_entry], log_file_name='/dev/null')
             pidfile_id = task._autoserv_monitor.pidfile_id
             autoserv_exit = task._autoserv_monitor.exit_code()
-            luciferlib.spawn_job_handler(
+            luciferlib.spawn_parsing_job_handler(
                     manager=_drone_manager,
                     job=job,
                     autoserv_exit=autoserv_exit,
@@ -1031,7 +1044,7 @@ class Dispatcher(object):
         gathering, parsing) states, and adds it to the dispatcher so
         it is handled by _handle_agents.
         """
-        for agent_task in self._get_queue_entry_agent_tasks(to_schedule=True):
+        for agent_task in self._get_queue_entry_agent_tasks():
             self.add_agent_task(agent_task)
 
 

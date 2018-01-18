@@ -26,6 +26,9 @@ from autotest_lib.server import utils as server_utils
 DEFAULT_REBOOT_BEFORE = model_attributes.RebootBefore.IF_DIRTY
 DEFAULT_REBOOT_AFTER = model_attributes.RebootBefore.NEVER
 
+RESPECT_STATIC_LABELS = global_config.global_config.get_config_value(
+        'SKYLAB', 'respect_static_labels', type=bool, default=False)
+
 
 class AclAccessViolation(Exception):
     """\
@@ -141,6 +144,58 @@ class Label(model_logic.ModelWithInvalid, dbmodels.Model):
 
     def __unicode__(self):
         return unicode(self.name)
+
+
+class StaticLabel(model_logic.ModelWithInvalid, dbmodels.Model):
+    """\
+    Required:
+      name: label name
+
+    Optional:
+      kernel_config: URL/path to kernel config for jobs run on this label.
+      platform: If True, this is a platform label (defaults to False).
+      only_if_needed: Deprecated. This is always False.
+      atomic_group: Deprecated. This is always NULL.
+    """
+    name = dbmodels.CharField(max_length=255, unique=True)
+    kernel_config = dbmodels.CharField(max_length=255, blank=True)
+    platform = dbmodels.BooleanField(default=False)
+    invalid = dbmodels.BooleanField(default=False,
+                                    editable=settings.FULL_ADMIN)
+    only_if_needed = dbmodels.BooleanField(default=False)
+
+    name_field = 'name'
+    objects = model_logic.ModelWithInvalidManager()
+    valid_objects = model_logic.ValidObjectsManager()
+    atomic_group = dbmodels.ForeignKey(AtomicGroup, null=True, blank=True)
+
+    def clean_object(self):
+        self.host_set.clear()
+        self.test_set.clear()
+
+
+    class Meta:
+        """Metadata for class StaticLabel."""
+        db_table = 'afe_static_labels'
+
+
+    def __unicode__(self):
+        return unicode(self.name)
+
+
+class ReplacedLabel(dbmodels.Model, model_logic.ModelExtensions):
+    """The tag to indicate Whether to replace labels with static labels."""
+    label = dbmodels.ForeignKey(Label)
+    objects = model_logic.ExtendedManager()
+
+
+    class Meta:
+        """Metadata for class ReplacedLabel."""
+        db_table = 'afe_replaced_labels'
+
+
+    def __unicode__(self):
+        return unicode(self.label)
 
 
 class Shard(dbmodels.Model, model_logic.ModelExtensions):
@@ -435,6 +490,8 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
     Protection = host_protections.Protection
     labels = dbmodels.ManyToManyField(Label, blank=True,
                                       db_table='afe_hosts_labels')
+    static_labels = dbmodels.ManyToManyField(
+            StaticLabel, blank=True, db_table='afe_static_hosts_labels')
     locked_by = dbmodels.ForeignKey(User, null=True, blank=True, editable=False)
     name_field = 'hostname'
     objects = model_logic.ModelWithInvalidManager()
@@ -446,6 +503,54 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
     def __init__(self, *args, **kwargs):
         super(Host, self).__init__(*args, **kwargs)
         self._record_attributes(['status'])
+
+
+    @classmethod
+    def classify_labels(cls, multiple_labels):
+        """Split labels to static & non-static.
+
+        @multiple_labels: a list of labels (string).
+
+        @returns: a list of StaticLabel objects & a list of
+                  (non-static) Label objects.
+        """
+        if not multiple_labels:
+            return [], []
+
+        labels = Label.objects.filter(name__in=multiple_labels)
+        if not RESPECT_STATIC_LABELS:
+            return [], labels
+
+        replaced_labels = ReplacedLabel.objects.filter(label__in=labels)
+        replaced_ids = [l.label.id for l in replaced_labels]
+        non_static_labels = [
+                l for l in labels if not l.id in replaced_ids]
+        static_label_names = [
+                l.name for l in labels if l.id in replaced_ids]
+        static_labels = StaticLabel.objects.filter(name__in=static_label_names)
+        return static_labels, non_static_labels
+
+
+    @classmethod
+    def get_hosts_with_labels(cls, multiple_labels, initial_query):
+        """Get hosts by label filters.
+
+        @param multiple_labels: label (string) lists for fetching hosts.
+        @param initial_query: a list of Host object, e.g.
+            [<Host: 100.107.151.253>, <Host: 100.107.151.251>, ...]
+        """
+        if not initial_query:
+            return set()
+
+        static_labels, non_static_labels = cls.classify_labels(multiple_labels)
+
+        for l in static_labels:
+            initial_query = initial_query.filter(static_labels=l)
+
+        for l in non_static_labels:
+            initial_query = initial_query.filter(labels=l)
+
+        return initial_query
 
 
     @staticmethod
@@ -567,6 +672,7 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
     def clean_object(self):
         self.aclgroup_set.clear()
         self.labels.clear()
+        self.static_labels.clear()
 
 
     def save(self, *args, **kwargs):
@@ -1237,6 +1343,8 @@ class Job(dbmodels.Model, model_logic.ModelExtensions):
                                     shard.id))
 
 
+    RebootBefore = model_attributes.RebootBefore
+    RebootAfter = model_attributes.RebootAfter
     # TIMEOUT is deprecated.
     DEFAULT_TIMEOUT = global_config.global_config.get_config_value(
         'AUTOTEST_WEB', 'job_timeout_default', default=24)

@@ -2,13 +2,14 @@ import logging
 import os
 import re
 
-from autotest_lib.client.common_lib import error, utils
+from autotest_lib.client.common_lib import error
+from autotest_lib.client.common_lib import utils
 from autotest_lib.client.common_lib.cros import autoupdater
 from autotest_lib.client.common_lib.cros import dev_server
 from autotest_lib.server.cros.dynamic_suite import tools
 from autotest_lib.server.cros.update_engine import omaha_devserver
 from autotest_lib.server.cros.update_engine import update_engine_test
-
+from chromite.lib import retry_util
 
 class autoupdate_P2P(update_engine_test.UpdateEngineTest):
     """Tests a peer to peer (P2P) autoupdate."""
@@ -24,14 +25,24 @@ class autoupdate_P2P(update_engine_test.UpdateEngineTest):
             self._omaha_devserver.stop_devserver()
         logging.info('Disabling p2p_update on hosts.')
         for host in self._hosts:
-            host.run('update_engine_client --p2p_update=no')
-
+            try:
+                cmd = 'update_engine_client --p2p_update=no'
+                retry_util.RetryException(error.AutoservRunError, 2, host.run,
+                                          cmd)
+            except Exception:
+                logging.info('Failed to disable P2P in cleanup.')
 
     def _enable_p2p_update_on_hosts(self):
         """Turn on the option to enable p2p updating on both DUTs."""
         logging.info('Enabling p2p_update on hosts.')
         for host in self._hosts:
-            host.run('update_engine_client --p2p_update=yes')
+            try:
+                cmd = 'update_engine_client --p2p_update=yes'
+                retry_util.RetryException(error.AutoservRunError, 2, host.run,
+                                          cmd)
+            except Exception:
+                raise error.TestFail('Failed to enable p2p on %s' % host)
+
             host.run('rm /var/lib/update_engine/prefs/p2p-num-attempts',
                      ignore_status=True)
             host.reboot()
@@ -97,7 +108,8 @@ class autoupdate_P2P(update_engine_test.UpdateEngineTest):
         """
         logging.info('Checking that p2p is still enabled after update.')
         def _is_p2p_enabled():
-            p2p = host.run('update_engine_client --show_p2p_update')
+            p2p = host.run('update_engine_client --show_p2p_update',
+                           ignore_status=True)
             if p2p.stderr is not None and 'ENABLED' in p2p.stderr:
                 return True
             else:
@@ -160,7 +172,12 @@ class autoupdate_P2P(update_engine_test.UpdateEngineTest):
         line3 = "Replacing URL (.*) with local URL " \
                 "http://%s:(.*)/cros_update_size_(.*)_hash_(.*).cros_au " \
                 "since p2p is enabled." % self._hosts[0].ip
+        errline = "Forcibly disabling use of p2p for downloading because no " \
+                  "suitable peer could be found."
 
+        if re.compile(errline).search(update_engine_log) is not None:
+            raise error.TestFail('P2P update was disabled because no suitable '
+                                 'peer DUT was found.')
         for line in [line1, line2, line3]:
             ue = re.compile(line)
             if ue.search(update_engine_log) is None:
@@ -238,5 +255,4 @@ class autoupdate_P2P(update_engine_test.UpdateEngineTest):
 
         # Update the 2nd DUT with the delta payload via P2P from the 1st DUT.
         update_engine_log = self._update_via_p2p(self._hosts[1])
-
         self._check_for_p2p_entries_in_update_log(update_engine_log)

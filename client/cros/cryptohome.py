@@ -423,13 +423,18 @@ def is_vault_mounted(user, regexes=None, allow_fail=False):
 
 def is_guest_vault_mounted(allow_fail=False):
     """Check whether a vault is mounted for the guest user.
-       It should be a mount of an ext4 partition on a loop device.
+       It should be a mount of an ext4 partition on a loop device
+       or be backed by tmpfs.
     """
     return is_vault_mounted(
         user=GUEST_USER_NAME,
         regexes={
+            # Remove tmpfs support when it becomes unnecessary as all guest
+            # modes will use ext4 on a loop device.
             constants.CRYPTOHOME_FS_REGEX_EXT4 :
                 constants.CRYPTOHOME_DEV_REGEX_LOOP_DEVICE,
+            constants.CRYPTOHOME_FS_REGEX_TMPFS :
+                constants.CRYPTOHOME_DEV_REGEX_GUEST,
         },
         allow_fail=allow_fail)
 
@@ -689,3 +694,14 @@ class CryptohomeProxy(DBusClient):
             password = ''.join(random.sample(string.ascii_lowercase, 6))
         self.remove(user)
         self.mount(user, password, create=True)
+
+    def lock_install_attributes(self, attrs):
+        """Set and lock install attributes for the device.
+
+        @param attrs: dict of install attributes.
+        """
+        for key, value in attrs.items():
+            if not self.__call(self.iface.InstallAttributesSet, key,
+                               dbus.ByteArray(value + '\0')):
+                return False
+        return self.__call(self.iface.InstallAttributesFinalize)
