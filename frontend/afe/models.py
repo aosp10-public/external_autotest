@@ -146,6 +146,19 @@ class Label(model_logic.ModelWithInvalid, dbmodels.Model):
         return unicode(self.name)
 
 
+    def is_replaced_by_static(self):
+        """Detect whether a label is replaced by a static label.
+
+        'Static' means it can only be modified by skylab inventory tools.
+        """
+        if RESPECT_STATIC_LABELS:
+            replaced = ReplacedLabel.objects.filter(label__id=self.id)
+            if len(replaced) > 0:
+                return True
+
+        return False
+
+
 class StaticLabel(model_logic.ModelWithInvalid, dbmodels.Model):
     """\
     Required:
@@ -506,43 +519,58 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
 
 
     @classmethod
-    def classify_labels(cls, multiple_labels):
+    def classify_labels(cls, label_names):
         """Split labels to static & non-static.
 
-        @multiple_labels: a list of labels (string).
+        @label_names: a list of labels (string).
 
         @returns: a list of StaticLabel objects & a list of
                   (non-static) Label objects.
         """
-        if not multiple_labels:
+        if not label_names:
             return [], []
 
-        labels = Label.objects.filter(name__in=multiple_labels)
+        labels = Label.objects.filter(name__in=label_names)
+
         if not RESPECT_STATIC_LABELS:
             return [], labels
 
-        replaced_labels = ReplacedLabel.objects.filter(label__in=labels)
+        return cls.classify_label_objects(labels)
+
+
+    @classmethod
+    def classify_label_objects(cls, label_objects):
+        replaced_labels = ReplacedLabel.objects.filter(label__in=label_objects)
         replaced_ids = [l.label.id for l in replaced_labels]
         non_static_labels = [
-                l for l in labels if not l.id in replaced_ids]
+                l for l in label_objects if not l.id in replaced_ids]
         static_label_names = [
-                l.name for l in labels if l.id in replaced_ids]
+                l.name for l in label_objects if l.id in replaced_ids]
         static_labels = StaticLabel.objects.filter(name__in=static_label_names)
         return static_labels, non_static_labels
 
 
     @classmethod
-    def get_hosts_with_labels(cls, multiple_labels, initial_query):
+    def get_hosts_with_labels(cls, label_names, initial_query):
         """Get hosts by label filters.
 
-        @param multiple_labels: label (string) lists for fetching hosts.
-        @param initial_query: a list of Host object, e.g.
-            [<Host: 100.107.151.253>, <Host: 100.107.151.251>, ...]
-        """
-        if not initial_query:
-            return set()
+        @param label_names: label (string) lists for fetching hosts.
+        @param initial_query: a model_logic.QuerySet of Host object, e.g.
 
-        static_labels, non_static_labels = cls.classify_labels(multiple_labels)
+                Host.objects.all(), Host.valid_objects.all().
+
+            This initial_query cannot be a sliced QuerySet, e.g.
+
+                Host.objects.all().filter(query_limit=10)
+        """
+        if not label_names:
+            return initial_query
+
+        static_labels, non_static_labels = cls.classify_labels(label_names)
+        if len(static_labels) + len(non_static_labels) != len(label_names):
+            # Some labels don't exist in afe db, which means no hosts
+            # should be matched.
+            return set()
 
         for l in static_labels:
             initial_query = initial_query.filter(static_labels=l)
@@ -551,6 +579,19 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
             initial_query = initial_query.filter(labels=l)
 
         return initial_query
+
+
+    @classmethod
+    def get_hosts_with_label_ids(cls, label_ids, initial_query):
+        """Get hosts by label_id filters.
+
+        @param label_ids: label id (int) lists for fetching hosts.
+        @param initial_query: a list of Host object, e.g.
+            [<Host: 100.107.151.253>, <Host: 100.107.151.251>, ...]
+        """
+        labels = Label.objects.filter(id__in=label_ids)
+        label_names = [l.name for l in labels]
+        return cls.get_hosts_with_labels(label_names, initial_query)
 
 
     @staticmethod
@@ -751,10 +792,16 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
             platform.
         """
         Host.objects.populate_relationships(hosts, Label, 'label_list')
+        Host.objects.populate_relationships(hosts, StaticLabel,
+                                            'staticlabel_list')
         errors = []
         for host in hosts:
             platforms = [label.name for label in host.label_list
                          if label.platform]
+            if RESPECT_STATIC_LABELS:
+                platforms += [label.name for label in host.staticlabel_list
+                              if label.platform]
+
             if platforms:
                 # do a join, just in case this host has multiple platforms,
                 # we'll be able to see it
@@ -777,10 +824,16 @@ class Host(model_logic.ModelWithInvalid, rdb_model_extensions.AbstractHostModel,
                 or the given board labels cannot be added to the hsots.
         """
         Host.objects.populate_relationships(hosts, Label, 'label_list')
+        Host.objects.populate_relationships(hosts, StaticLabel,
+                                            'staticlabel_list')
         errors = []
         for host in hosts:
             boards = [label.name for label in host.label_list
                       if label.name.startswith('board:')]
+            if RESPECT_STATIC_LABELS:
+                boards += [label.name for label in host.staticlabel_list
+                           if label.name.startswith('board:')]
+
             if not server_utils.board_labels_allowed(boards + new_labels):
                 # do a join, just in case this host has multiple boards,
                 # we'll be able to see it
@@ -1291,10 +1344,8 @@ class Job(dbmodels.Model, model_logic.ModelExtensions):
         '  (t1.id = t2.job_id AND t2.complete != 1 AND t2.active != 1 '
         '   AND t2.meta_host IS NULL AND t2.host_id IS NOT NULL '
         '   %(check_known_jobs)s) '
-        'LEFT OUTER JOIN afe_hosts_labels t3 ON (t2.host_id = t3.host_id) '
-        'WHERE (t3.label_id IN '
-        '  (SELECT label_id FROM afe_shards_labels '
-        '   WHERE shard_id = %(shard_id)s))'
+        'LEFT OUTER JOIN %(host_label_table)s t3 ON (t2.host_id = t3.host_id) '
+        'WHERE (t3.%(host_label_column)s IN %(label_ids)s)'
         )
 
     # Even if we had filters about complete, active and aborted
@@ -1532,10 +1583,29 @@ class Job(dbmodels.Model, model_logic.ModelExtensions):
             check_known_jobs_exclude = 'AND NOT ' + check_known_jobs
             check_known_jobs_include = 'OR ' + check_known_jobs
 
-        for sql in [cls.SQL_SHARD_JOBS, cls.SQL_SHARD_JOBS_WITH_HOSTS]:
-            query = Job.objects.raw(sql % {
-                    'check_known_jobs': check_known_jobs_exclude,
-                    'shard_id': shard.id})
+        query = Job.objects.raw(cls.SQL_SHARD_JOBS % {
+                'check_known_jobs': check_known_jobs_exclude,
+                'shard_id': shard.id})
+        job_ids |= set([j.id for j in query])
+
+        static_labels, non_static_labels = Host.classify_label_objects(
+                shard.labels.all())
+        if static_labels:
+            label_ids = [str(l.id) for l in static_labels]
+            query = Job.objects.raw(cls.SQL_SHARD_JOBS_WITH_HOSTS % {
+                'check_known_jobs': check_known_jobs_exclude,
+                'host_label_table': 'afe_static_hosts_labels',
+                'host_label_column': 'staticlabel_id',
+                'label_ids': '(%s)' % ','.join(label_ids)})
+            job_ids |= set([j.id for j in query])
+
+        if non_static_labels:
+            label_ids = [str(l.id) for l in non_static_labels]
+            query = Job.objects.raw(cls.SQL_SHARD_JOBS_WITH_HOSTS % {
+                'check_known_jobs': check_known_jobs_exclude,
+                'host_label_table': 'afe_hosts_labels',
+                'host_label_column': 'label_id',
+                'label_ids': '(%s)' % ','.join(label_ids)})
             job_ids |= set([j.id for j in query])
 
         if job_ids:

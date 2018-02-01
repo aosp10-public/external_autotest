@@ -37,7 +37,6 @@ from autotest_lib.scheduler import scheduler_config
 from autotest_lib.server import autoserv_utils
 from autotest_lib.server import system_utils
 from autotest_lib.server import utils as server_utils
-from autotest_lib.site_utils import metadata_reporter
 from autotest_lib.site_utils import server_manager_utils
 
 try:
@@ -171,13 +170,11 @@ def main_without_exception_handling():
         global _testing_mode
         _testing_mode = True
 
-    # Start the thread to report metadata.
-    metadata_reporter.start()
-
     with ts_mon_config.SetupTsMonGlobalState('autotest_scheduler',
                                              indirect=True,
                                              debug_file=options.metrics_file):
       try:
+          metrics.Counter('chromeos/autotest/scheduler/start').increment()
           process_start_time = time.time()
           initialize()
           dispatcher = Dispatcher()
@@ -205,7 +202,6 @@ def main_without_exception_handling():
           metrics.Counter('chromeos/autotest/scheduler/uncaught_exception'
                           ).increment()
 
-    metadata_reporter.abort()
     email_manager.manager.send_queued_emails()
     _drone_manager.shutdown()
     _db_manager.disconnect()
@@ -543,7 +539,7 @@ class Dispatcher(object):
                 + self._get_special_task_agent_tasks(is_active=True))
 
 
-    def _get_queue_entry_agent_tasks(self):
+    def _get_queue_entry_agent_tasks(self, to_schedule=False):
         """
         Get agent tasks for all hqe in the specified states.
 
@@ -553,17 +549,24 @@ class Dispatcher(object):
         one agent task at a time, but there might be multiple queue entries in
         the group.
 
+        @param to_schedule: Whether to get agent tasks for scheduling
         @return: A list of AgentTasks.
         """
-        # TODO(crbug.com/748234): This is temporary to enable
-        # toggling lucifer rollouts with an option.
-        if luciferlib.is_enabled_for('GATHERING'):
-            statuses = (models.HostQueueEntry.Status.STARTING,
-                        models.HostQueueEntry.Status.RUNNING)
-        elif luciferlib.is_enabled_for('PARSING'):
-            statuses = (models.HostQueueEntry.Status.STARTING,
-                        models.HostQueueEntry.Status.RUNNING,
-                        models.HostQueueEntry.Status.GATHERING)
+        if to_schedule:
+            # TODO(crbug.com/748234): This is temporary to enable
+            # toggling lucifer rollouts with an option.
+            if luciferlib.is_enabled_for('GATHERING'):
+                statuses = (models.HostQueueEntry.Status.STARTING,
+                            models.HostQueueEntry.Status.RUNNING)
+            elif luciferlib.is_enabled_for('PARSING'):
+                statuses = (models.HostQueueEntry.Status.STARTING,
+                            models.HostQueueEntry.Status.RUNNING,
+                            models.HostQueueEntry.Status.GATHERING)
+            else:
+                statuses = (models.HostQueueEntry.Status.STARTING,
+                            models.HostQueueEntry.Status.RUNNING,
+                            models.HostQueueEntry.Status.GATHERING,
+                            models.HostQueueEntry.Status.PARSING)
         else:
             # host queue entry statuses handled directly by AgentTasks
             # (Verifying is handled through SpecialTasks, so is not
@@ -1044,7 +1047,7 @@ class Dispatcher(object):
         gathering, parsing) states, and adds it to the dispatcher so
         it is handled by _handle_agents.
         """
-        for agent_task in self._get_queue_entry_agent_tasks():
+        for agent_task in self._get_queue_entry_agent_tasks(to_schedule=True):
             self.add_agent_task(agent_task)
 
 

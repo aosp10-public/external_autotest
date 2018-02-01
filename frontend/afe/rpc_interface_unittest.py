@@ -31,13 +31,233 @@ SERVER = control_data.CONTROL_TYPE_NAMES.SERVER
 _hqe_status = models.HostQueueEntry.Status
 
 
-class RpcInterfaceTestWithStaticLabel(unittest.TestCase,
-                       frontend_test_utils.FrontendTestMixin):
+class ShardHeartbeatTest(mox.MoxTestBase, unittest.TestCase):
+
+    _PRIORITY = priorities.Priority.DEFAULT
+
+    def _do_heartbeat_and_assert_response(self, shard_hostname='shard1',
+                                          upload_jobs=(), upload_hqes=(),
+                                          known_jobs=(), known_hosts=(),
+                                          **kwargs):
+        known_job_ids = [job.id for job in known_jobs]
+        known_host_ids = [host.id for host in known_hosts]
+        known_host_statuses = [host.status for host in known_hosts]
+
+        retval = rpc_interface.shard_heartbeat(
+            shard_hostname=shard_hostname,
+            jobs=upload_jobs, hqes=upload_hqes,
+            known_job_ids=known_job_ids, known_host_ids=known_host_ids,
+            known_host_statuses=known_host_statuses)
+
+        self._assert_shard_heartbeat_response(shard_hostname, retval,
+                                              **kwargs)
+
+        return shard_hostname
+
+
+    def _assert_shard_heartbeat_response(self, shard_hostname, retval, jobs=[],
+                                         hosts=[], hqes=[],
+                                         incorrect_host_ids=[]):
+
+        retval_hosts, retval_jobs = retval['hosts'], retval['jobs']
+        retval_incorrect_hosts = retval['incorrect_host_ids']
+
+        expected_jobs = [
+            (job.id, job.name, shard_hostname) for job in jobs]
+        returned_jobs = [(job['id'], job['name'], job['shard']['hostname'])
+                         for job in retval_jobs]
+        self.assertEqual(returned_jobs, expected_jobs)
+
+        expected_hosts = [(host.id, host.hostname) for host in hosts]
+        returned_hosts = [(host['id'], host['hostname'])
+                          for host in retval_hosts]
+        self.assertEqual(returned_hosts, expected_hosts)
+
+        retval_hqes = []
+        for job in retval_jobs:
+            retval_hqes += job['hostqueueentry_set']
+
+        expected_hqes = [(hqe.id) for hqe in hqes]
+        returned_hqes = [(hqe['id']) for hqe in retval_hqes]
+        self.assertEqual(returned_hqes, expected_hqes)
+
+        self.assertEqual(retval_incorrect_hosts, incorrect_host_ids)
+
+
+    def _createJobForLabel(self, label):
+        job_id = rpc_interface.create_job(name='dummy', priority=self._PRIORITY,
+                                          control_file='foo',
+                                          control_type=CLIENT,
+                                          meta_hosts=[label.name],
+                                          dependencies=(label.name,))
+        return models.Job.objects.get(id=job_id)
+
+
+    def _testShardHeartbeatFetchHostlessJobHelper(self, host1):
+        """Create a hostless job and ensure it's not assigned to a shard."""
+        label2 = models.Label.objects.create(name='bluetooth', platform=False)
+
+        job1 = self._create_job(hostless=True)
+
+        # Hostless jobs should be executed by the global scheduler.
+        self._do_heartbeat_and_assert_response(hosts=[host1])
+
+
+    def _testShardHeartbeatIncorrectHostsHelper(self, host1):
+        """Ensure that hosts that don't belong to shard are determined."""
+        host2 = models.Host.objects.create(hostname='test_host2', leased=False)
+
+        # host2 should not belong to shard1. Ensure that if shard1 thinks host2
+        # is a known host, then it is returned as invalid.
+        self._do_heartbeat_and_assert_response(known_hosts=[host1, host2],
+                                               incorrect_host_ids=[host2.id])
+
+
+    def _testShardHeartbeatLabelRemovalRaceHelper(self, shard1, host1, label1):
+        """Ensure correctness if label removed during heartbeat."""
+        host2 = models.Host.objects.create(hostname='test_host2', leased=False)
+        host2.labels.add(label1)
+        self.assertEqual(host2.shard, None)
+
+        # In the middle of the assign_to_shard call, remove label1 from shard1.
+        self.mox.StubOutWithMock(models.Host, '_assign_to_shard_nothing_helper')
+        def remove_label():
+            rpc_interface.remove_board_from_shard(shard1.hostname, label1.name)
+
+        models.Host._assign_to_shard_nothing_helper().WithSideEffects(
+            remove_label)
+        self.mox.ReplayAll()
+
+        self._do_heartbeat_and_assert_response(
+            known_hosts=[host1], hosts=[], incorrect_host_ids=[host1.id])
+        host2 = models.Host.smart_get(host2.id)
+        self.assertEqual(host2.shard, None)
+
+
+    def _testShardRetrieveJobsHelper(self, shard1, host1, label1, shard2,
+                                     host2, label2):
+        """Create jobs and retrieve them."""
+        # should never be returned by heartbeat
+        leased_host = models.Host.objects.create(hostname='leased_host',
+                                                 leased=True)
+
+        leased_host.labels.add(label1)
+
+        job1 = self._createJobForLabel(label1)
+
+        job2 = self._createJobForLabel(label2)
+
+        job_completed = self._createJobForLabel(label1)
+        # Job is already being run, so don't sync it
+        job_completed.hostqueueentry_set.update(complete=True)
+        job_completed.hostqueueentry_set.create(complete=False)
+
+        job_active = self._createJobForLabel(label1)
+        # Job is already started, so don't sync it
+        job_active.hostqueueentry_set.update(active=True)
+        job_active.hostqueueentry_set.create(complete=False, active=False)
+
+        self._do_heartbeat_and_assert_response(
+            jobs=[job1], hosts=[host1], hqes=job1.hostqueueentry_set.all())
+
+        self._do_heartbeat_and_assert_response(
+            shard_hostname=shard2.hostname,
+            jobs=[job2], hosts=[host2], hqes=job2.hostqueueentry_set.all())
+
+        host3 = models.Host.objects.create(hostname='test_host3', leased=False)
+        host3.labels.add(label1)
+
+        self._do_heartbeat_and_assert_response(
+            known_jobs=[job1], known_hosts=[host1], hosts=[host3])
+
+
+    def _testResendJobsAfterFailedHeartbeatHelper(self, shard1, host1, label1):
+        """Create jobs, retrieve them, fail on client, fetch them again."""
+        job1 = self._createJobForLabel(label1)
+
+        self._do_heartbeat_and_assert_response(
+            jobs=[job1],
+            hqes=job1.hostqueueentry_set.all(), hosts=[host1])
+
+        # Make sure it's resubmitted by sending last_job=None again
+        self._do_heartbeat_and_assert_response(
+            known_hosts=[host1],
+            jobs=[job1], hqes=job1.hostqueueentry_set.all(), hosts=[])
+
+        # Now it worked, make sure it's not sent again
+        self._do_heartbeat_and_assert_response(
+            known_jobs=[job1], known_hosts=[host1])
+
+        job1 = models.Job.objects.get(pk=job1.id)
+        job1.hostqueueentry_set.all().update(complete=True)
+
+        # Job is completed, make sure it's not sent again
+        self._do_heartbeat_and_assert_response(
+            known_hosts=[host1])
+
+        job2 = self._createJobForLabel(label1)
+
+        # job2's creation was later, it should be returned now.
+        self._do_heartbeat_and_assert_response(
+            known_hosts=[host1],
+            jobs=[job2], hqes=job2.hostqueueentry_set.all())
+
+        self._do_heartbeat_and_assert_response(
+            known_jobs=[job2], known_hosts=[host1])
+
+        job2 = models.Job.objects.get(pk=job2.pk)
+        job2.hostqueueentry_set.update(aborted=True)
+        # Setting a job to a complete status will set the shard_id to None in
+        # scheduler_models. We have to emulate that here, because we use Django
+        # models in tests.
+        job2.shard = None
+        job2.save()
+
+        self._do_heartbeat_and_assert_response(
+            known_jobs=[job2], known_hosts=[host1],
+            jobs=[job2],
+            hqes=job2.hostqueueentry_set.all())
+
+        models.Test.objects.create(name='platform_BootPerfServer:shard',
+                                   test_type=1)
+        self.mox.StubOutWithMock(server_utils, 'read_file')
+        self.mox.ReplayAll()
+        rpc_interface.delete_shard(hostname=shard1.hostname)
+
+        self.assertRaises(
+            models.Shard.DoesNotExist, models.Shard.objects.get, pk=shard1.id)
+
+        job1 = models.Job.objects.get(pk=job1.id)
+        label1 = models.Label.objects.get(pk=label1.id)
+
+        self.assertIsNone(job1.shard)
+        self.assertEqual(len(label1.shard_set.all()), 0)
+
+
+    def _testResendHostsAfterFailedHeartbeatHelper(self, host1):
+        """Check that master accepts resending updated records after failure."""
+        # Send the host
+        self._do_heartbeat_and_assert_response(hosts=[host1])
+
+        # Send it again because previous one didn't persist correctly
+        self._do_heartbeat_and_assert_response(hosts=[host1])
+
+        # Now it worked, make sure it isn't sent again
+        self._do_heartbeat_and_assert_response(known_hosts=[host1])
+
+
+class RpcInterfaceTestWithStaticLabel(ShardHeartbeatTest,
+                                      frontend_test_utils.FrontendTestMixin):
+
+    _STATIC_LABELS = ['board:lumpy']
+
     def setUp(self):
+        super(RpcInterfaceTestWithStaticLabel, self).setUp()
         self._frontend_common_setup()
         self.god = mock.mock_god()
         self.old_respect_static_config = rpc_interface.RESPECT_STATIC_LABELS
         rpc_interface.RESPECT_STATIC_LABELS = True
+        models.RESPECT_STATIC_LABELS = True
 
 
     def tearDown(self):
@@ -45,6 +265,7 @@ class RpcInterfaceTestWithStaticLabel(unittest.TestCase,
         self._frontend_common_teardown()
         global_config.global_config.reset_config_values()
         rpc_interface.RESPECT_STATIC_LABELS = self.old_respect_static_config
+        models.RESPECT_STATIC_LABELS = self.old_respect_static_config
 
 
     def test_delete_static_label(self):
@@ -88,6 +309,239 @@ class RpcInterfaceTestWithStaticLabel(unittest.TestCase,
 
         self.assertEqual(models.Label.smart_get('static').invalid, 0)
         self.god.check_playback()
+
+
+    def test_multiple_platforms_add_non_static_to_static(self):
+        """Test non-static platform to a host with static platform."""
+        static_platform = models.StaticLabel.objects.create(
+                name='static_platform', platform=True)
+        non_static_platform = models.Label.objects.create(
+                name='static_platform', platform=True)
+        models.ReplacedLabel.objects.create(label_id=non_static_platform.id)
+        platform2 = models.Label.objects.create(name='platform2', platform=True)
+        host1 = models.Host.objects.create(hostname='test_host')
+        host1.static_labels.add(static_platform)
+        host1.labels.add(non_static_platform)
+        host1.save()
+
+        self.assertRaises(model_logic.ValidationError,
+                          rpc_interface.label_add_hosts, id='platform2',
+                          hosts=['test_host'])
+        self.assertRaises(model_logic.ValidationError,
+                          rpc_interface.host_add_labels,
+                          id='test_host', labels=['platform2'])
+        # make sure the platform didn't get added
+        platforms = rpc_interface.get_labels(
+            host__hostname__in=['test_host'], platform=True)
+        self.assertEquals(len(platforms), 1)
+
+
+    def test_multiple_platforms_add_static_to_non_static(self):
+        """Test static platform to a host with non-static platform."""
+        platform1 = models.Label.objects.create(
+                name='static_platform', platform=True)
+        models.ReplacedLabel.objects.create(label_id=platform1.id)
+        static_platform = models.StaticLabel.objects.create(
+                name='static_platform', platform=True)
+        platform2 = models.Label.objects.create(
+                name='platform2', platform=True)
+
+        host1 = models.Host.objects.create(hostname='test_host')
+        host1.labels.add(platform2)
+        host1.save()
+
+        self.assertRaises(model_logic.ValidationError,
+                          rpc_interface.label_add_hosts,
+                          id='static_platform',
+                          hosts=['test_host'])
+        self.assertRaises(model_logic.ValidationError,
+                          rpc_interface.host_add_labels,
+                          id='test_host', labels=['static_platform'])
+        # make sure the platform didn't get added
+        platforms = rpc_interface.get_labels(
+            host__hostname__in=['test_host'], platform=True)
+        self.assertEquals(len(platforms), 1)
+
+
+    def test_label_remove_hosts(self):
+        """Test remove a label of hosts."""
+        label = models.Label.smart_get('static')
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        host1 = models.Host.objects.create(hostname='test_host')
+        host1.labels.add(label)
+        host1.static_labels.add(static_label)
+        host1.save()
+
+        self.assertRaises(error.UnmodifiableLabelException,
+                          rpc_interface.label_remove_hosts,
+                          id='static', hosts=['test_host'])
+
+
+    def test_host_remove_labels(self):
+        """Test remove labels of a given host."""
+        label = models.Label.smart_get('static')
+        label1 = models.Label.smart_get('label1')
+        label2 = models.Label.smart_get('label2')
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        host1 = models.Host.objects.create(hostname='test_host')
+        host1.labels.add(label)
+        host1.labels.add(label1)
+        host1.labels.add(label2)
+        host1.static_labels.add(static_label)
+        host1.save()
+
+        rpc_interface.host_remove_labels(
+                'test_host', ['static', 'label1'])
+        labels = rpc_interface.get_labels(host__hostname__in=['test_host'])
+        # Only non_static label 'label1' is removed.
+        self.assertEquals(len(labels), 2)
+        self.assertEquals(labels[0].get('name'), 'label2')
+
+
+    def test_remove_board_from_shard(self):
+        """test remove a board (static label) from shard."""
+        label = models.Label.smart_get('static')
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        shard = models.Shard.objects.create(hostname='test_shard')
+        shard.labels.add(label)
+
+        host = models.Host.objects.create(hostname='test_host',
+                                          leased=False,
+                                          shard=shard)
+        host.static_labels.add(static_label)
+        host.save()
+
+        rpc_interface.remove_board_from_shard(shard.hostname, label.name)
+        host1 = models.Host.smart_get(host.id)
+        shard1 = models.Shard.smart_get(shard.id)
+        self.assertEqual(host1.shard, None)
+        self.assertItemsEqual(shard1.labels.all(), [])
+
+
+    def test_check_job_dependencies_success(self):
+        """Test check_job_dependencies successfully."""
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        host = models.Host.objects.create(hostname='test_host')
+        host.static_labels.add(static_label)
+        host.save()
+
+        host1 = models.Host.smart_get(host.id)
+        rpc_utils.check_job_dependencies([host1], ['static'])
+
+
+    def test_check_job_dependencies_fail(self):
+        """Test check_job_dependencies with raising ValidationError."""
+        label = models.Label.smart_get('static')
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        host = models.Host.objects.create(hostname='test_host')
+        host.labels.add(label)
+        host.save()
+
+        host1 = models.Host.smart_get(host.id)
+        self.assertRaises(model_logic.ValidationError,
+                          rpc_utils.check_job_dependencies,
+                          [host1],
+                          ['static'])
+
+    def test_check_job_metahost_dependencies_success(self):
+        """Test check_job_metahost_dependencies successfully."""
+        label1 = models.Label.smart_get('label1')
+        label2 = models.Label.smart_get('label2')
+        label = models.Label.smart_get('static')
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        host = models.Host.objects.create(hostname='test_host')
+        host.static_labels.add(static_label)
+        host.labels.add(label1)
+        host.labels.add(label2)
+        host.save()
+
+        rpc_utils.check_job_metahost_dependencies(
+                [label1, label], [label2.name])
+        rpc_utils.check_job_metahost_dependencies(
+                [label1], [label2.name, static_label.name])
+
+
+    def test_check_job_metahost_dependencies_fail(self):
+        """Test check_job_metahost_dependencies with raising errors."""
+        label1 = models.Label.smart_get('label1')
+        label2 = models.Label.smart_get('label2')
+        label = models.Label.smart_get('static')
+        static_label = models.StaticLabel.objects.create(name='static')
+
+        host = models.Host.objects.create(hostname='test_host')
+        host.labels.add(label1)
+        host.labels.add(label2)
+        host.save()
+
+        self.assertRaises(error.NoEligibleHostException,
+                          rpc_utils.check_job_metahost_dependencies,
+                          [label1, label], [label2.name])
+        self.assertRaises(error.NoEligibleHostException,
+                          rpc_utils.check_job_metahost_dependencies,
+                          [label1], [label2.name, static_label.name])
+
+
+    def _createShardAndHostWithStaticLabel(self,
+                                           shard_hostname='shard1',
+                                           host_hostname='test_host1',
+                                           label_name='board:lumpy'):
+        label = models.Label.objects.create(name=label_name)
+
+        shard = models.Shard.objects.create(hostname=shard_hostname)
+        shard.labels.add(label)
+
+        host = models.Host.objects.create(hostname=host_hostname, leased=False,
+                                          shard=shard)
+        host.labels.add(label)
+        if label_name in self._STATIC_LABELS:
+            models.ReplacedLabel.objects.create(label_id=label.id)
+            static_label = models.StaticLabel.objects.create(name=label_name)
+            host.static_labels.add(static_label)
+
+        return shard, host, label
+
+
+    def testShardHeartbeatFetchHostlessJob(self):
+        shard1, host1, label1 = self._createShardAndHostWithStaticLabel(
+                host_hostname='test_host1')
+        self._testShardHeartbeatFetchHostlessJobHelper(host1)
+
+
+    def testShardHeartbeatIncorrectHosts(self):
+        shard1, host1, label1 = self._createShardAndHostWithStaticLabel(
+                host_hostname='test_host1')
+        self._testShardHeartbeatIncorrectHostsHelper(host1)
+
+
+    def testShardHeartbeatLabelRemovalRace(self):
+        shard1, host1, label1 = self._createShardAndHostWithStaticLabel(
+                host_hostname='test_host1')
+        self._testShardHeartbeatLabelRemovalRaceHelper(shard1, host1, label1)
+
+
+    def testShardRetrieveJobs(self):
+        shard1, host1, label1 = self._createShardAndHostWithStaticLabel()
+        shard2, host2, label2 = self._createShardAndHostWithStaticLabel(
+            'shard2', 'test_host2', 'board:grumpy')
+        self._testShardRetrieveJobsHelper(shard1, host1, label1,
+                                          shard2, host2, label2)
+
+
+    def testResendJobsAfterFailedHeartbeat(self):
+        shard1, host1, label1 = self._createShardAndHostWithStaticLabel()
+        self._testResendJobsAfterFailedHeartbeatHelper(shard1, host1, label1)
+
+
+    def testResendHostsAfterFailedHeartbeat(self):
+        shard1, host1, label1 = self._createShardAndHostWithStaticLabel(
+                host_hostname='test_host1')
+        self._testResendHostsAfterFailedHeartbeatHelper(host1)
 
 
 class RpcInterfaceTest(unittest.TestCase,
@@ -762,8 +1216,8 @@ class RpcInterfaceTest(unittest.TestCase,
         self.assertEquals('cool-image', image)
 
 
-class ExtraRpcInterfaceTest(mox.MoxTestBase,
-                           frontend_test_utils.FrontendTestMixin):
+class ExtraRpcInterfaceTest(frontend_test_utils.FrontendTestMixin,
+                            ShardHeartbeatTest):
     """Unit tests for functions originally in site_rpc_interface.py.
 
     @var _NAME: fake suite name.
@@ -1013,55 +1467,6 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
                 }]
 
 
-    def _do_heartbeat_and_assert_response(self, shard_hostname='shard1',
-                                          upload_jobs=(), upload_hqes=(),
-                                          known_jobs=(), known_hosts=(),
-                                          **kwargs):
-        known_job_ids = [job.id for job in known_jobs]
-        known_host_ids = [host.id for host in known_hosts]
-        known_host_statuses = [host.status for host in known_hosts]
-
-        retval = rpc_interface.shard_heartbeat(
-            shard_hostname=shard_hostname,
-            jobs=upload_jobs, hqes=upload_hqes,
-            known_job_ids=known_job_ids, known_host_ids=known_host_ids,
-            known_host_statuses=known_host_statuses)
-
-        self._assert_shard_heartbeat_response(shard_hostname, retval,
-                                              **kwargs)
-
-        return shard_hostname
-
-
-    def _assert_shard_heartbeat_response(self, shard_hostname, retval, jobs=[],
-                                         hosts=[], hqes=[],
-                                         incorrect_host_ids=[]):
-
-        retval_hosts, retval_jobs = retval['hosts'], retval['jobs']
-        retval_incorrect_hosts = retval['incorrect_host_ids']
-
-        expected_jobs = [
-            (job.id, job.name, shard_hostname) for job in jobs]
-        returned_jobs = [(job['id'], job['name'], job['shard']['hostname'])
-                         for job in retval_jobs]
-        self.assertEqual(returned_jobs, expected_jobs)
-
-        expected_hosts = [(host.id, host.hostname) for host in hosts]
-        returned_hosts = [(host['id'], host['hostname'])
-                          for host in retval_hosts]
-        self.assertEqual(returned_hosts, expected_hosts)
-
-        retval_hqes = []
-        for job in retval_jobs:
-            retval_hqes += job['hostqueueentry_set']
-
-        expected_hqes = [(hqe.id) for hqe in hqes]
-        returned_hqes = [(hqe['id']) for hqe in retval_hqes]
-        self.assertEqual(returned_hqes, expected_hqes)
-
-        self.assertEqual(retval_incorrect_hosts, incorrect_host_ids)
-
-
     def _send_records_to_master_helper(
         self, jobs, hqes, shard_hostname='host1',
         exception_to_throw=error.UnallowedRecordsSentToMaster, aborted=False):
@@ -1172,7 +1577,10 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
                                      host_hostname='host1',
                                      label_name='board:lumpy'):
         """Create a label, host, shard, and assign host to shard."""
-        label = models.Label.objects.create(name=label_name)
+        try:
+            label = models.Label.objects.create(name=label_name)
+        except:
+            label = models.Label.smart_get(label_name)
 
         shard = models.Shard.objects.create(hostname=shard_hostname)
         shard.labels.add(label)
@@ -1182,64 +1590,6 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
         host.labels.add(label)
 
         return shard, host, label
-
-
-    def _createJobForLabel(self, label):
-        job_id = rpc_interface.create_job(name='dummy', priority=self._PRIORITY,
-                                          control_file='foo',
-                                          control_type=CLIENT,
-                                          meta_hosts=[label.name],
-                                          dependencies=(label.name,))
-        return models.Job.objects.get(id=job_id)
-
-
-    def testShardHeartbeatFetchHostlessJob(self):
-        """Create a hostless job and ensure it's not assigned to a shard."""
-        shard1, host1, lumpy_label = self._createShardAndHostWithLabel(
-            'shard1', 'host1', 'board:lumpy')
-
-        label2 = models.Label.objects.create(name='bluetooth', platform=False)
-
-        job1 = self._create_job(hostless=True)
-
-        # Hostless jobs should be executed by the global scheduler.
-        self._do_heartbeat_and_assert_response(hosts=[host1])
-
-
-    def testShardHeartbeatIncorrectHosts(self):
-        """Ensure that hosts that don't belong to shard are determined."""
-        shard1, host1, lumpy_label = self._createShardAndHostWithLabel()
-
-        host2 = models.Host.objects.create(hostname='host2', leased=False)
-
-        # host2 should not belong to shard1. Ensure that if shard1 thinks host2
-        # is a known host, then it is returned as invalid.
-        self._do_heartbeat_and_assert_response(known_hosts=[host1, host2],
-                                               incorrect_host_ids=[host2.id])
-
-
-    def testShardHeartbeatLabelRemovalRace(self):
-        """Ensure correctness if label removed during heartbeat."""
-        shard1, host1, lumpy_label = self._createShardAndHostWithLabel()
-
-        host2 = models.Host.objects.create(hostname='host2', leased=False)
-        host2.labels.add(lumpy_label)
-        self.assertEqual(host2.shard, None)
-
-        # In the middle of the assign_to_shard call, remove lumpy_label from
-        # shard1.
-        self.mox.StubOutWithMock(models.Host, '_assign_to_shard_nothing_helper')
-        def remove_label():
-            rpc_interface.remove_board_from_shard(
-                    shard1.hostname, lumpy_label.name)
-        models.Host._assign_to_shard_nothing_helper().WithSideEffects(
-            remove_label)
-        self.mox.ReplayAll()
-
-        self._do_heartbeat_and_assert_response(
-            known_hosts=[host1], hosts=[], incorrect_host_ids=[host1.id])
-        host2 = models.Host.smart_get(host2.id)
-        self.assertEqual(host2.shard, None)
 
 
     def testShardLabelRemovalInvalid(self):
@@ -1264,119 +1614,6 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
         shard1 = models.Shard.smart_get(shard1.id)
         self.assertEqual(host1.shard, None)
         self.assertItemsEqual(shard1.labels.all(), [])
-
-
-    def testShardRetrieveJobs(self):
-        """Create jobs and retrieve them."""
-        # should never be returned by heartbeat
-        leased_host = models.Host.objects.create(hostname='leased_host',
-                                                 leased=True)
-
-        shard1, host1, lumpy_label = self._createShardAndHostWithLabel()
-        shard2, host2, grumpy_label = self._createShardAndHostWithLabel(
-            'shard2', 'host2', 'board:grumpy')
-
-        leased_host.labels.add(lumpy_label)
-
-        job1 = self._createJobForLabel(lumpy_label)
-
-        job2 = self._createJobForLabel(grumpy_label)
-
-        job_completed = self._createJobForLabel(lumpy_label)
-        # Job is already being run, so don't sync it
-        job_completed.hostqueueentry_set.update(complete=True)
-        job_completed.hostqueueentry_set.create(complete=False)
-
-        job_active = self._createJobForLabel(lumpy_label)
-        # Job is already started, so don't sync it
-        job_active.hostqueueentry_set.update(active=True)
-        job_active.hostqueueentry_set.create(complete=False, active=False)
-
-        self._do_heartbeat_and_assert_response(
-            jobs=[job1], hosts=[host1], hqes=job1.hostqueueentry_set.all())
-
-        self._do_heartbeat_and_assert_response(
-            shard_hostname=shard2.hostname,
-            jobs=[job2], hosts=[host2], hqes=job2.hostqueueentry_set.all())
-
-        host3 = models.Host.objects.create(hostname='host3', leased=False)
-        host3.labels.add(lumpy_label)
-
-        self._do_heartbeat_and_assert_response(
-            known_jobs=[job1], known_hosts=[host1], hosts=[host3])
-
-
-    def testResendJobsAfterFailedHeartbeat(self):
-        """Create jobs, retrieve them, fail on client, fetch them again."""
-        shard1, host1, lumpy_label = self._createShardAndHostWithLabel()
-
-        job1 = self._createJobForLabel(lumpy_label)
-
-        self._do_heartbeat_and_assert_response(
-            jobs=[job1],
-            hqes=job1.hostqueueentry_set.all(), hosts=[host1])
-
-        # Make sure it's resubmitted by sending last_job=None again
-        self._do_heartbeat_and_assert_response(
-            known_hosts=[host1],
-            jobs=[job1], hqes=job1.hostqueueentry_set.all(), hosts=[])
-
-        # Now it worked, make sure it's not sent again
-        self._do_heartbeat_and_assert_response(
-            known_jobs=[job1], known_hosts=[host1])
-
-        job1 = models.Job.objects.get(pk=job1.id)
-        job1.hostqueueentry_set.all().update(complete=True)
-
-        # Job is completed, make sure it's not sent again
-        self._do_heartbeat_and_assert_response(
-            known_hosts=[host1])
-
-        job2 = self._createJobForLabel(lumpy_label)
-
-        # job2's creation was later, it should be returned now.
-        self._do_heartbeat_and_assert_response(
-            known_hosts=[host1],
-            jobs=[job2], hqes=job2.hostqueueentry_set.all())
-
-        self._do_heartbeat_and_assert_response(
-            known_jobs=[job2], known_hosts=[host1])
-
-        job2 = models.Job.objects.get(pk=job2.pk)
-        job2.hostqueueentry_set.update(aborted=True)
-        # Setting a job to a complete status will set the shard_id to None in
-        # scheduler_models. We have to emulate that here, because we use Django
-        # models in tests.
-        job2.shard = None
-        job2.save()
-
-        self._do_heartbeat_and_assert_response(
-            known_jobs=[job2], known_hosts=[host1],
-            jobs=[job2],
-            hqes=job2.hostqueueentry_set.all())
-
-        models.Test.objects.create(name='platform_BootPerfServer:shard',
-                                   test_type=1)
-        self.mox.StubOutWithMock(server_utils, 'read_file')
-        server_utils.read_file(mox.IgnoreArg()).AndReturn('')
-        self.mox.ReplayAll()
-        rpc_interface.delete_shard(hostname=shard1.hostname)
-
-        self.assertRaises(
-            models.Shard.DoesNotExist, models.Shard.objects.get, pk=shard1.id)
-
-        job1 = models.Job.objects.get(pk=job1.id)
-        lumpy_label = models.Label.objects.get(pk=lumpy_label.id)
-        host1 = models.Host.objects.get(pk=host1.id)
-        super_job = models.Job.objects.get(priority=priorities.Priority.SUPER)
-        super_job_host = models.HostQueueEntry.objects.get(
-                job_id=super_job.id)
-
-        self.assertIsNone(job1.shard)
-        self.assertEqual(len(lumpy_label.shard_set.all()), 0)
-        self.assertIsNone(host1.shard)
-        self.assertIsNotNone(super_job)
-        self.assertEqual(super_job_host.host_id, host1.id)
 
 
     def testCreateListShard(self):
@@ -1433,18 +1670,37 @@ class ExtraRpcInterfaceTest(mox.MoxTestBase,
                            'id': 1}])
 
 
+    def testShardHeartbeatFetchHostlessJob(self):
+        shard1, host1, label1 = self._createShardAndHostWithLabel()
+        self._testShardHeartbeatFetchHostlessJobHelper(host1)
+
+
+    def testShardHeartbeatIncorrectHosts(self):
+        shard1, host1, label1 = self._createShardAndHostWithLabel()
+        self._testShardHeartbeatIncorrectHostsHelper(host1)
+
+
+    def testShardHeartbeatLabelRemovalRace(self):
+        shard1, host1, label1 = self._createShardAndHostWithLabel()
+        self._testShardHeartbeatLabelRemovalRaceHelper(shard1, host1, label1)
+
+
+    def testShardRetrieveJobs(self):
+        shard1, host1, label1 = self._createShardAndHostWithLabel()
+        shard2, host2, label2 = self._createShardAndHostWithLabel(
+                'shard2', 'host2', 'board:grumpy')
+        self._testShardRetrieveJobsHelper(shard1, host1, label1,
+                                          shard2, host2, label2)
+
+
+    def testResendJobsAfterFailedHeartbeat(self):
+        shard1, host1, label1 = self._createShardAndHostWithLabel()
+        self._testResendJobsAfterFailedHeartbeatHelper(shard1, host1, label1)
+
+
     def testResendHostsAfterFailedHeartbeat(self):
-        """Check that master accepts resending updated records after failure."""
-        shard1, host1, lumpy_label = self._createShardAndHostWithLabel()
-
-        # Send the host
-        self._do_heartbeat_and_assert_response(hosts=[host1])
-
-        # Send it again because previous one didn't persist correctly
-        self._do_heartbeat_and_assert_response(hosts=[host1])
-
-        # Now it worked, make sure it isn't sent again
-        self._do_heartbeat_and_assert_response(known_hosts=[host1])
+        shard1, host1, label1 = self._createShardAndHostWithLabel()
+        self._testResendHostsAfterFailedHeartbeatHelper(host1)
 
 
 if __name__ == '__main__':

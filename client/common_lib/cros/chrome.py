@@ -165,12 +165,14 @@ class Chrome(object):
         # (Without this, Chrome coredumps are trashed.)
         open(constants.CHROME_CORE_MAGIC_FILE, 'w').close()
 
+        self._browser_to_create = browser_finder.FindBrowser(
+            finder_options)
+        self._browser_to_create.SetUpEnvironment(b_options)
         for i in range(num_tries):
             try:
-                browser_to_create = browser_finder.FindBrowser(finder_options)
-                self._browser = browser_to_create.Create(finder_options)
-                _cri = cros_interface.CrOSInterface()
-                self._browser_pid = _cri.GetChromePid()
+                self._browser = self._browser_to_create.Create()
+                self._browser_pid = \
+                    cros_interface.CrOSInterface().GetChromePid()
                 if utils.is_arc_available():
                     if disable_arc_opt_in:
                         if arc_util.should_start_arc(arc_mode):
@@ -200,9 +202,6 @@ class Chrome(object):
         """Returns a telemetry browser instance."""
         return self._browser
 
-    def get_browser_pid(self):
-        """Returns the pid of the telemetry browser"""
-        return self._browser_pid
 
     def get_extension(self, extension_path):
         """Fetches a telemetry extension instance given the extension path."""
@@ -321,4 +320,5 @@ class Chrome(object):
             # (crbug.com/663387)
             self._browser.platform.StopAllLocalServers()
             self._browser.Close()
+            self._browser_to_create.CleanUpEnvironment()
             self._browser.platform.network_controller.Close()
