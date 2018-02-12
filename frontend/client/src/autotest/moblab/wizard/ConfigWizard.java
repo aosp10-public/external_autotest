@@ -127,17 +127,18 @@ public class ConfigWizard extends Composite {
         layoutTable.setWidget(row, 0, new Label("Update"));
         FlowPanel updatePanel = new FlowPanel();
         updatePanel.add(new InlineLabel(info.getUpdateString()));
-        Button btnUpdate = new Button("Update Now");
+        Button btnUpdate = new Button(info.getUpdateAction());
         btnUpdate.addClickHandler(new ClickHandler() {
           @Override
           public void onClick(ClickEvent event) {
             String windowText = "If an update is available, the device will be "
-              + "rebooted and all running jobs will be halted. Proceed?";
+              + "rebooted and all running jobs will be halted. "
+              + "This may take 5-10 minutes based on network speed. Proceed?";
             if (Window.confirm(windowText)) {
               MoblabRpcHelper.updateMoblab(new JsonRpcCallback() {
                 @Override
                 public void onSuccess(JSONValue result) {
-                  String messageText = "Update command has been issued";
+                  String messageText = "Device is rebooting";
                   NotifyManager.getInstance().showMessage(messageText);
                 }
               });
