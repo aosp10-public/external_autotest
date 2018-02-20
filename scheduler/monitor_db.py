@@ -484,6 +484,14 @@ class Dispatcher(object):
 
         @param agent_task: A SpecialTask for the agent to manage.
         """
+        # These are owned by lucifer; don't manage these tasks.
+        if (luciferlib.is_enabled_for('GATHERING')
+            and (isinstance(agent_task, postjob_task.GatherLogsTask)
+                 # TODO(crbug.com/811877): Don't skip split HQE parsing.
+                 or (isinstance(agent_task, postjob_task.FinalReparseTask)
+                     and not luciferlib.is_split_job(
+                             agent_task.queue_entries[0].id)))):
+            return
         agent = Agent(agent_task)
         self._agents.append(agent)
         agent.dispatcher = self
@@ -539,7 +547,7 @@ class Dispatcher(object):
                 + self._get_special_task_agent_tasks(is_active=True))
 
 
-    def _get_queue_entry_agent_tasks(self, to_schedule=False):
+    def _get_queue_entry_agent_tasks(self):
         """
         Get agent tasks for all hqe in the specified states.
 
@@ -549,32 +557,15 @@ class Dispatcher(object):
         one agent task at a time, but there might be multiple queue entries in
         the group.
 
-        @param to_schedule: Whether to get agent tasks for scheduling
         @return: A list of AgentTasks.
         """
-        if to_schedule:
-            # TODO(crbug.com/748234): This is temporary to enable
-            # toggling lucifer rollouts with an option.
-            if luciferlib.is_enabled_for('GATHERING'):
-                statuses = (models.HostQueueEntry.Status.STARTING,
-                            models.HostQueueEntry.Status.RUNNING)
-            elif luciferlib.is_enabled_for('PARSING'):
-                statuses = (models.HostQueueEntry.Status.STARTING,
-                            models.HostQueueEntry.Status.RUNNING,
-                            models.HostQueueEntry.Status.GATHERING)
-            else:
-                statuses = (models.HostQueueEntry.Status.STARTING,
-                            models.HostQueueEntry.Status.RUNNING,
-                            models.HostQueueEntry.Status.GATHERING,
-                            models.HostQueueEntry.Status.PARSING)
-        else:
-            # host queue entry statuses handled directly by AgentTasks
-            # (Verifying is handled through SpecialTasks, so is not
-            # listed here)
-            statuses = (models.HostQueueEntry.Status.STARTING,
-                        models.HostQueueEntry.Status.RUNNING,
-                        models.HostQueueEntry.Status.GATHERING,
-                        models.HostQueueEntry.Status.PARSING)
+        # host queue entry statuses handled directly by AgentTasks
+        # (Verifying is handled through SpecialTasks, so is not
+        # listed here)
+        statuses = (models.HostQueueEntry.Status.STARTING,
+                    models.HostQueueEntry.Status.RUNNING,
+                    models.HostQueueEntry.Status.GATHERING,
+                    models.HostQueueEntry.Status.PARSING)
         status_list = ','.join("'%s'" % status for status in statuses)
         queue_entries = scheduler_models.HostQueueEntry.fetch(
                 where='status IN (%s)' % status_list)
@@ -592,7 +583,11 @@ class Dispatcher(object):
                 if entry in used_queue_entries:
                     # already picked up by a synchronous job
                     continue
-                agent_task = self._get_agent_task_for_queue_entry(entry)
+                try:
+                    agent_task = self._get_agent_task_for_queue_entry(entry)
+                except scheduler_lib.SchedulerError:
+                    # Probably being handled by lucifer crbug.com/809773
+                    continue
                 agent_tasks.append(agent_task)
                 used_queue_entries.update(agent_task.queue_entries)
             except scheduler_lib.MalformedRecordError as e:
@@ -648,7 +643,7 @@ class Dispatcher(object):
         if queue_entry.status == models.HostQueueEntry.Status.PARSING:
             return postjob_task.FinalReparseTask(queue_entries=task_entries)
 
-        raise scheduler_lib.SchedulerError(
+        raise scheduler_lib.MalformedRecordError(
                 '_get_agent_task_for_queue_entry got entry with '
                 'invalid status %s: %s' % (queue_entry.status, queue_entry))
 
@@ -668,7 +663,7 @@ class Dispatcher(object):
         """
         if self.host_has_agent(entry.host):
             agent = tuple(self._host_agents.get(entry.host.id))[0]
-            raise scheduler_lib.SchedulerError(
+            raise scheduler_lib.MalformedRecordError(
                     'While scheduling %s, host %s already has a host agent %s'
                     % (entry, entry.host, agent.task))
 
@@ -701,7 +696,7 @@ class Dispatcher(object):
             if agent_task_class.TASK_TYPE == special_task.task:
                 return agent_task_class(task=special_task)
 
-        raise scheduler_lib.SchedulerError(
+        raise scheduler_lib.MalformedRecordError(
                 'No AgentTask class for task', str(special_task))
 
 
@@ -970,10 +965,7 @@ class Dispatcher(object):
         """
         Hand off ownership of a job to lucifer component.
         """
-        # TODO(crbug.com/748234): This is temporary to enable toggling
-        # lucifer rollouts with an option.
-        if luciferlib.is_enabled_for('GATHERING'):
-            self._send_gathering_to_lucifer()
+        self._send_gathering_to_lucifer()
         self._send_parsing_to_lucifer()
 
 
@@ -1015,9 +1007,11 @@ class Dispatcher(object):
             # owning it.
             if self.get_agents_for_entry(queue_entry):
                 continue
-
             job = queue_entry.job
             if luciferlib.is_lucifer_owned(job):
+                continue
+            # TODO(crbug.com/811877): Ignore split HQEs.
+            if luciferlib.is_split_job(queue_entry.id):
                 continue
             task = postjob_task.PostJobTask(
                     [queue_entry], log_file_name='/dev/null')
@@ -1047,7 +1041,7 @@ class Dispatcher(object):
         gathering, parsing) states, and adds it to the dispatcher so
         it is handled by _handle_agents.
         """
-        for agent_task in self._get_queue_entry_agent_tasks(to_schedule=True):
+        for agent_task in self._get_queue_entry_agent_tasks():
             self.add_agent_task(agent_task)
 
 

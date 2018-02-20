@@ -23,11 +23,11 @@ appear.
 
 cfm_test = CfmTest(
     scenario=Scenario(
-        AssertUsbDevices(ATRUS),
+        AssertUsbDevices([ATRUS]),
         RepeatTimes(10, Scenario(
             # Atruses take a while to boot, often close to 10 seconds.
             # Increase the timeout to 30 to ensure we give it enough time.
-            PowerCycleUsbPort(ATRUS, wait_for_change_timeout=30),
+            PowerCycleUsbPort([ATRUS], wait_for_change_timeout=30),
             AssertNoNewCrashes()
         ))
     ),

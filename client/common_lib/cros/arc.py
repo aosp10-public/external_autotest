@@ -20,6 +20,7 @@ _ADB_KEYS_PATH = '/tmp/adb_keys'
 _ADB_VENDOR_KEYS = 'ADB_VENDOR_KEYS'
 _ANDROID_CONTAINER_PID_PATH = '/run/containers/android*/container.pid'
 _ANDROID_DATA_ROOT_PATH = '/opt/google/containers/android/rootfs/android-data'
+_ANDROID_CONTAINER_ROOT_PATH = '/opt/google/containers/android/rootfs'
 _SCREENSHOT_DIR_PATH = '/var/log/arc-screenshots'
 _SCREENSHOT_BASENAME = 'arc-screenshot'
 _MAX_SCREENSHOT_NUM = 10
@@ -204,7 +205,7 @@ def adb_root():
 
 def get_container_root():
     """Returns path to Android container root directory."""
-    return os.path.dirname(get_container_pid_path())
+    return _ANDROID_CONTAINER_ROOT_PATH
 
 
 def get_container_pid_path():
@@ -213,8 +214,8 @@ def get_container_pid_path():
     Raises:
       TestError if no PID file is found, or more than one files are found.
     """
-    # Find the PID file rather than the android_XXXXXX/ directory to ignore
-    # stale and empty android_XXXXXX/ directories when they exist.
+    # Find the PID file rather than the android-XXXXXX/ directory to ignore
+    # stale and empty android-XXXXXX/ directories when they exist.
     arc_container_pid_files = glob.glob(_ANDROID_CONTAINER_PID_PATH)
 
     if len(arc_container_pid_files) == 0:

@@ -51,6 +51,8 @@ suite:bvt-inline
 suite:bvt-installer
 suite:bvt-perbuild
 suite:cell_emulator
+suite:cellular_au
+suite:cellular_au_nightly
 suite:cellular_endtoend
 suite:cellular_mbim_compliance
 suite:cellular_modem_repair
@@ -182,7 +184,10 @@ suite:toolchain-tests
 suite:touch
 suite:video
 suite:video_image_comparison_chameleon
-suite:vmtest-informational
+suite:vmtest-informational1
+suite:vmtest-informational2
+suite:vmtest-informational3
+suite:vmtest-informational4
 suite:wifi_atten_perf
 suite:wifi_correctness_cros_core
 suite:wifi_endtoend
