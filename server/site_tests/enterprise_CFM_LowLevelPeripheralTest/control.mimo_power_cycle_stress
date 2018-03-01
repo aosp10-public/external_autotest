@@ -9,7 +9,7 @@ NAME = "enterprise_CFM_LowLevelPeripheralTest.mimo_power_cycle_stress"
 PURPOSE = "Stresses a Mimo by repeatedly power cycling its USB port."
 CRITERIA = ("Mimo detectable as a USB device after each cycle "
             "and no crash files appear")
-ATTRIBUTES = "suite:bluestreak, suite:bluestreak-release"
+ATTRIBUTES = "suite:bluestreak, suite:bluestreak-release, suite:bluestreak-perbuild"
 TIME = "MEDIUM"
 TEST_CATEGORY = "Stress"
 TEST_TYPE = "server"
@@ -22,6 +22,7 @@ appear.
 """
 
 cfm_test = CfmTest(
+    configuration=Configuration(skip_enrollment=True),
     scenario=Scenario(
         AssertUsbDevices(ALL_MIMO_DISPLAYS),
         RepeatTimes(10, Scenario(

@@ -122,6 +122,8 @@ def inventory_api_response_parse(response, environment):
     # cname has unique constraint in DB, empty value should be set to None.
     if not sub_dict_for_server['cname']:
       sub_dict_for_server['cname'] = None
+    if not sub_dict_for_server['note']:
+      sub_dict_for_server['note'] = None
     servers.append(Server(**sub_dict_for_server))
 
   # Parse server_attrs tuples
@@ -222,9 +224,9 @@ def create_mysql_updates(api_output, db_output, table,
                (server_id, entry.role))
       mysql_cmds.append(cmd)
 
-  metrics.Counter(_METRICS_PREFIX + '/inconsistency').increment_by(
+  metrics.Gauge(_METRICS_PREFIX + '/inconsistency_found').set(
       len(delete_entries), fields={'table': table, 'action': 'to_delete'})
-  metrics.Counter(_METRICS_PREFIX + '/inconsistency').increment_by(
+  metrics.Gauge(_METRICS_PREFIX + '/inconsistency_found').set(
       len(insert_entries), fields={'table': table, 'action': 'to_add'})
 
   return mysql_cmds
@@ -297,10 +299,12 @@ def _modify_table(cursor, mysql_cmds, table):
   finally:
     num_deletes = len([cmd.startswith('DELETE') for cmd in mysql_cmds])
     num_inserts = len([cmd.startswith('INSERT') for cmd in mysql_cmds])
-    metrics.Counter(_METRICS_PREFIX + '/deletion').increment_by(
-        num_deletes, fields={'table': table, 'succeed': succeed})
-    metrics.Counter(_METRICS_PREFIX + '/inserts').increment_by(
-        num_inserts, fields={'table': table, 'succeed': succeed})
+    metrics.Gauge(_METRICS_PREFIX + '/inconsistency_fixed').set(
+        num_deletes,
+        fields={'table': table, 'action': 'delete', 'succeed': succeed})
+    metrics.Gauge(_METRICS_PREFIX + '/inconsistency_fixed').set(
+        num_inserts,
+        fields={'table': table, 'action': 'insert', 'succeed': succeed})
 
 
 @contextlib.contextmanager
@@ -389,6 +393,7 @@ def main(argv):
   with ts_mon_config.SetupTsMonGlobalState(service_name='sync_server_db',
                                            indirect=True):
     try:
+      metrics.Counter(_METRICS_PREFIX + '/start').increment()
       logging.info("Setting signal handler")
       signal.signal(signal.SIGINT, handle_signal)
       signal.signal(signal.SIGTERM, handle_signal)

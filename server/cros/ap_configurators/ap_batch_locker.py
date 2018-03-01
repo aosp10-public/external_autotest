@@ -18,6 +18,7 @@ from autotest_lib.server.cros.ap_configurators import ap_cartridge
 
 # Max number of retry attempts to lock an ap.
 MAX_RETRIES = 3
+CHAOS_URL = 'https://chaos-188802.appspot.com'
 
 
 class ApLocker(object):
@@ -161,8 +162,9 @@ class ApBatchLocker(object):
             return True
 
         # Begin locking device in datastore.
-        locked_device = requests.put(CHAOS_URL + '/lock', \
-                        json={"hostname":[ap_locker.configurator.host_name]})
+        locked_device = requests.put(CHAOS_URL + '/devices/lock', \
+                        json={"hostname":[ap_locker.configurator.host_name], \
+                        "locked_by":"TestRun"})
         if locked_device.json()['result']:
             self._locked_aps.append(ap_locker)
             logging.info('locked %s', ap_locker.configurator.host_name)
@@ -197,6 +199,8 @@ class ApBatchLocker(object):
 
             for ap_locker in self.aps_to_lock:
                 logging.info('checking %s', ap_locker.configurator.host_name)
+                # TODO(@rjahagir): Change method to datastore.
+                # if self.lock_ap_in_datastore(ap_locker):
                 if self.lock_ap_in_afe(ap_locker):
                     ap_batch.append(ap_locker.configurator)
                     if len(ap_batch) == batch_size:
@@ -247,7 +251,7 @@ class ApBatchLocker(object):
         for ap_locker in self._locked_aps:
             if host_name == ap_locker.configurator.host_name:
                 # Unlock in datastore
-                unlocked_device = requests.put(CHAOS_URL + '/unlock', \
+                unlocked_device = requests.put(CHAOS_URL + '/devices/unlock', \
                                   json={"hostname":host_name})
                 # TODO: Raise error if unable to unlock.
                 if !unlocked_device.json()['result']:
@@ -268,6 +272,8 @@ class ApBatchLocker(object):
         for ap_locker in self._locked_aps:
             host_names.append(ap_locker.configurator.host_name)
         for host_name in host_names:
+            # TODO(@rjahagir): Change method to datastore.
+            # self.unlock_one_ap_in_datastore(host_name)
             self.unlock_one_ap(host_name)
 
 
@@ -279,6 +285,8 @@ class ApBatchLocker(object):
         for ap_locker in self._locked_aps:
             if host_name == ap_locker.configurator.host_name:
                 self.aps_to_lock.append(ap_locker)
+                # TODO(@rjahagir): Change method to datastore.
+                # self.unlock_one_ap_in_datastore(host_name)
                 self.unlock_one_ap(host_name)
                 return
 

@@ -217,9 +217,9 @@ class Interface:
         return bool(self.addresses)
 
 
-    @property
-    def is_up(self):
-        """@return True if this interface is UP, False otherwise."""
+
+    def get_ip_flags(self):
+        """@return List of flags from 'ip addr show'."""
         # "ip addr show %s 2> /dev/null" returns something that looks like:
         #
         # 2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast
@@ -237,13 +237,37 @@ class Interface:
         if result.exit_status != 0:
             # The "ip" command will return non-zero if the interface does
             # not exist.
-            return False
+            return []
         status_line = address_info.splitlines()[0]
         flags_str = status_line[status_line.find('<')+1:status_line.find('>')]
-        flags = flags_str.split(',')
-        if 'UP' not in flags:
+        return flags_str.split(',')
+
+
+    @property
+    def is_up(self):
+        """@return True if this interface is UP, False otherwise."""
+        return 'UP' in self.get_ip_flags()
+
+
+    @property
+    def is_lower_up(self):
+        """
+        Check if the interface is in LOWER_UP state. This usually means (e.g.,
+        for ethernet) a link is detected.
+
+        @return True if this interface is LOWER_UP, False otherwise."""
+        return 'LOWER_UP' in self.get_ip_flags()
+
+
+    def is_link_operational(self):
+        """@return True if RFC 2683 IfOperStatus is UP (i.e., is able to pass
+        packets).
+        """
+        command = 'ip link show %s' % self._name
+        result = self._run(command, ignore_status=True)
+        if result.exit_status:
             return False
-        return True
+        return result.stdout.find('state UP') >= 0
 
 
     @property
@@ -428,6 +452,16 @@ class Interface:
         logging.error('Failed to find noise level for %s at %d MHz.',
                       self._name, frequency_mhz)
         return None
+
+
+def get_interfaces():
+    """
+    Retrieve the list of network interfaces found on the system.
+
+    @return List of interfaces.
+
+    """
+    return [Interface(nic.strip()) for nic in os.listdir(DEVICE_INFO_ROOT)]
 
 
 def get_prioritized_default_route(host=None, interface_name_regex=None):
