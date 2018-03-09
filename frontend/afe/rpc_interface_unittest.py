@@ -246,6 +246,112 @@ class ShardHeartbeatTest(mox.MoxTestBase, unittest.TestCase):
         self._do_heartbeat_and_assert_response(known_hosts=[host1])
 
 
+class RpcInterfaceTestWithStaticAttribute(
+        mox.MoxTestBase, unittest.TestCase,
+        frontend_test_utils.FrontendTestMixin):
+
+    def setUp(self):
+        super(RpcInterfaceTestWithStaticAttribute, self).setUp()
+        self._frontend_common_setup()
+        self.god = mock.mock_god()
+        self.old_respect_static_config = rpc_interface.RESPECT_STATIC_ATTRIBUTES
+        rpc_interface.RESPECT_STATIC_ATTRIBUTES = True
+        models.RESPECT_STATIC_ATTRIBUTES = True
+
+
+    def tearDown(self):
+        self.god.unstub_all()
+        self._frontend_common_teardown()
+        global_config.global_config.reset_config_values()
+        rpc_interface.RESPECT_STATIC_ATTRIBUTES = self.old_respect_static_config
+        models.RESPECT_STATIC_ATTRIBUTES = self.old_respect_static_config
+
+
+    def _fake_host_with_static_attributes(self):
+        host1 = models.Host.objects.create(hostname='test_host')
+        host1.set_attribute('test_attribute1', 'test_value1')
+        host1.set_attribute('test_attribute2', 'test_value2')
+        self._set_static_attribute(host1, 'test_attribute1', 'static_value1')
+        self._set_static_attribute(host1, 'static_attribute1', 'static_value2')
+        host1.save()
+        return host1
+
+
+    def test_get_hosts(self):
+        host1 = self._fake_host_with_static_attributes()
+        hosts = rpc_interface.get_hosts(hostname=host1.hostname)
+        host = hosts[0]
+
+        self.assertEquals(host['hostname'], 'test_host')
+        self.assertEquals(host['acls'], ['Everyone'])
+        # Respect the value of static attributes.
+        self.assertEquals(host['attributes'],
+                          {'test_attribute1': 'static_value1',
+                           'test_attribute2': 'test_value2',
+                           'static_attribute1': 'static_value2'})
+
+    def test_get_host_attribute_with_static(self):
+        host1 = models.Host.objects.create(hostname='test_host1')
+        host1.set_attribute('test_attribute1', 'test_value1')
+        self._set_static_attribute(host1, 'test_attribute1', 'static_value1')
+        host2 = models.Host.objects.create(hostname='test_host2')
+        host2.set_attribute('test_attribute1', 'test_value1')
+        host2.set_attribute('test_attribute2', 'test_value2')
+
+        attributes = rpc_interface.get_host_attribute(
+                'test_attribute1',
+                hostname__in=['test_host1', 'test_host2'])
+        hosts = [attr['host'] for attr in attributes]
+        values = [attr['value'] for attr in attributes]
+        self.assertEquals(set(hosts),
+                          set(['test_host1', 'test_host2']))
+        self.assertEquals(set(values),
+                          set(['test_value1', 'static_value1']))
+
+
+    def test_get_hosts_by_attribute_without_static(self):
+        host1 = models.Host.objects.create(hostname='test_host1')
+        host1.set_attribute('test_attribute1', 'test_value1')
+        host2 = models.Host.objects.create(hostname='test_host2')
+        host2.set_attribute('test_attribute1', 'test_value1')
+
+        hosts = rpc_interface.get_hosts_by_attribute(
+                'test_attribute1', 'test_value1')
+        self.assertEquals(set(hosts),
+                          set(['test_host1', 'test_host2']))
+
+
+    def test_get_hosts_by_attribute_with_static(self):
+        host1 = models.Host.objects.create(hostname='test_host1')
+        host1.set_attribute('test_attribute1', 'test_value1')
+        self._set_static_attribute(host1, 'test_attribute1', 'test_value1')
+        host2 = models.Host.objects.create(hostname='test_host2')
+        host2.set_attribute('test_attribute1', 'test_value1')
+        self._set_static_attribute(host2, 'test_attribute1', 'static_value1')
+        host3 = models.Host.objects.create(hostname='test_host3')
+        self._set_static_attribute(host3, 'test_attribute1', 'test_value1')
+        host4 = models.Host.objects.create(hostname='test_host4')
+        host4.set_attribute('test_attribute1', 'test_value1')
+        host5 = models.Host.objects.create(hostname='test_host5')
+        host5.set_attribute('test_attribute1', 'temp_value1')
+        self._set_static_attribute(host5, 'test_attribute1', 'test_value1')
+
+        hosts = rpc_interface.get_hosts_by_attribute(
+                'test_attribute1', 'test_value1')
+        # host1: matched, it has the same value for test_attribute1.
+        # host2: not matched, it has a new value in
+        #        afe_static_host_attributes for test_attribute1.
+        # host3: matched, it has a corresponding entry in
+        #        afe_host_attributes for test_attribute1.
+        # host4: matched, test_attribute1 is not replaced by static
+        #        attribute.
+        # host5: matched, it has an updated & matched value for
+        #        test_attribute1 in afe_static_host_attributes.
+        self.assertEquals(set(hosts),
+                          set(['test_host1', 'test_host3',
+                               'test_host4', 'test_host5']))
+
+
 class RpcInterfaceTestWithStaticLabel(ShardHeartbeatTest,
                                       frontend_test_utils.FrontendTestMixin):
 
@@ -266,6 +372,44 @@ class RpcInterfaceTestWithStaticLabel(ShardHeartbeatTest,
         global_config.global_config.reset_config_values()
         rpc_interface.RESPECT_STATIC_LABELS = self.old_respect_static_config
         models.RESPECT_STATIC_LABELS = self.old_respect_static_config
+
+
+    def _fake_host_with_static_labels(self):
+        host1 = models.Host.objects.create(hostname='test_host')
+        label1 = models.Label.objects.create(
+                name='non_static_label1', platform=False)
+        non_static_platform = models.Label.objects.create(
+                name='static_platform', platform=False)
+        static_platform = models.StaticLabel.objects.create(
+                name='static_platform', platform=True)
+        models.ReplacedLabel.objects.create(label_id=non_static_platform.id)
+        host1.static_labels.add(static_platform)
+        host1.labels.add(non_static_platform)
+        host1.labels.add(label1)
+        host1.save()
+        return host1
+
+
+    def test_get_hosts(self):
+        host1 = self._fake_host_with_static_labels()
+        hosts = rpc_interface.get_hosts(hostname=host1.hostname)
+        host = hosts[0]
+
+        self.assertEquals(host['hostname'], 'test_host')
+        self.assertEquals(host['acls'], ['Everyone'])
+        # Respect all labels in afe_hosts_labels.
+        self.assertEquals(host['labels'],
+                          ['non_static_label1', 'static_platform'])
+        # Respect static labels.
+        self.assertEquals(host['platform'], 'static_platform')
+
+
+    def test_get_hosts_multiple_labels(self):
+        self._fake_host_with_static_labels()
+        hosts = rpc_interface.get_hosts(
+                multiple_labels=['non_static_label1', 'static_platform'])
+        host = hosts[0]
+        self.assertEquals(host['hostname'], 'test_host')
 
 
     def test_delete_static_label(self):
@@ -588,6 +732,34 @@ class RpcInterfaceTest(unittest.TestCase,
 
     def test_ping_db(self):
         self.assertEquals(rpc_interface.ping_db(), [True])
+
+
+    def test_get_hosts_by_attribute(self):
+        host1 = models.Host.objects.create(hostname='test_host1')
+        host1.set_attribute('test_attribute1', 'test_value1')
+        host2 = models.Host.objects.create(hostname='test_host2')
+        host2.set_attribute('test_attribute1', 'test_value1')
+
+        hosts = rpc_interface.get_hosts_by_attribute(
+                'test_attribute1', 'test_value1')
+        self.assertEquals(set(hosts),
+                          set(['test_host1', 'test_host2']))
+
+
+    def test_get_host_attribute(self):
+        host1 = models.Host.objects.create(hostname='test_host1')
+        host1.set_attribute('test_attribute1', 'test_value1')
+        host2 = models.Host.objects.create(hostname='test_host2')
+        host2.set_attribute('test_attribute1', 'test_value1')
+
+        attributes = rpc_interface.get_host_attribute(
+                'test_attribute1',
+                hostname__in=['test_host1', 'test_host2'])
+        hosts = [attr['host'] for attr in attributes]
+        values = [attr['value'] for attr in attributes]
+        self.assertEquals(set(hosts),
+                          set(['test_host1', 'test_host2']))
+        self.assertEquals(set(values), set(['test_value1']))
 
 
     def test_get_hosts(self):
