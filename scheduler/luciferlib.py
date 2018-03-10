@@ -13,6 +13,7 @@ import common
 from autotest_lib.client.bin import local_host
 from autotest_lib.client.common_lib import global_config
 from autotest_lib.server.hosts import ssh_host
+from autotest_lib.frontend.afe import models
 
 _config = global_config.global_config
 _SECTION = 'LUCIFER'
@@ -47,6 +48,41 @@ def is_lucifer_owned(job):
     return hasattr(job, 'jobhandoff')
 
 
+def is_split_job(hqe_id):
+    """Return True if HQE is part of a job with HQEs in a different group.
+
+    For examples if the given HQE have execution_subdir=foo and the job
+    has an HQE with execution_subdir=bar, then return True.  The only
+    situation where this happens is if provisioning in a multi-DUT job
+    fails, the HQEs will each be in their own group.
+
+    See https://bugs.chromium.org/p/chromium/issues/detail?id=811877
+
+    @param hqe_id: HQE id
+    """
+    hqe = models.HostQueueEntry.objects.get(id=hqe_id)
+    hqes = hqe.job.hostqueueentry_set.all()
+    try:
+        _get_consistent_execution_path(hqes)
+    except _ExecutionPathError:
+        return True
+    return False
+
+
+# TODO(crbug.com/748234): This is temporary to enable toggling
+# lucifer rollouts with an option.
+def spawn_starting_job_handler(manager, job):
+    """Spawn job_reporter to handle a job.
+
+    Pass all arguments by keyword.
+
+    @param manager: scheduler.drone_manager.DroneManager instance
+    @param job: Job instance
+    @returns: Drone instance
+    """
+    raise NotImplementedError
+
+
 # TODO(crbug.com/748234): This is temporary to enable toggling
 # lucifer rollouts with an option.
 def spawn_gathering_job_handler(manager, job, autoserv_exit, pidfile_id=None):
@@ -65,23 +101,22 @@ def spawn_gathering_job_handler(manager, job, autoserv_exit, pidfile_id=None):
         drone = manager.pick_drone_to_use()
     else:
         drone = manager.get_drone_for_pidfile(pidfile_id)
-    args = [
-            '--run-job-path', _get_run_job_path(),
-            '--jobdir', _get_jobdir(),
-            '--job-id', str(job.id),
-            '--autoserv-exit', str(autoserv_exit),
-    ]
-    # lucifer_run_job arguments
     results_dir = _results_dir(manager, job)
     num_tests_failed = manager.get_num_tests_failed(pidfile_id)
-    args.extend([
-            '--',
-            '-resultsdir', results_dir,
-            '-autotestdir', _AUTOTEST_DIR,
-            '-watcherpath', _get_watcher_path(),
-            '-x-need-gather',
-            '-x-num-tests-failed', str(num_tests_failed),
-    ])
+    args = [
+            # General configuration
+            '--jobdir', _get_jobdir(),
+            '--run-job-path', _get_run_job_path(),
+            '--watcher-path', _get_watcher_path(),
+
+            # Job specific
+            '--job-id', str(job.id),
+            '--lucifer-level', 'GATHERING',
+            '--autoserv-exit', str(autoserv_exit),
+            '--need-gather',
+            '--num-tests-failed', str(num_tests_failed),
+            '--results-dir', results_dir,
+    ]
     output_file = os.path.join(results_dir, 'job_reporter_output.log')
     drone.spawn(_JOB_REPORTER_PATH, args, output_file=output_file)
     return drone
@@ -105,20 +140,19 @@ def spawn_parsing_job_handler(manager, job, autoserv_exit, pidfile_id=None):
         drone = manager.pick_drone_to_use()
     else:
         drone = manager.get_drone_for_pidfile(pidfile_id)
-    args = [
-            '--run-job-path', _get_run_job_path(),
-            '--jobdir', _get_jobdir(),
-            '--job-id', str(job.id),
-            '--autoserv-exit', str(autoserv_exit),
-    ]
-    # lucifer_run_job arguments
     results_dir = _results_dir(manager, job)
-    args.extend([
-            '--',
-            '-resultsdir', results_dir,
-            '-autotestdir', _AUTOTEST_DIR,
-            '-watcherpath', _get_watcher_path(),
-    ])
+    args = [
+            # General configuration
+            '--jobdir', _get_jobdir(),
+            '--run-job-path', _get_run_job_path(),
+            '--watcher-path', _get_watcher_path(),
+
+            # Job specific
+            '--job-id', str(job.id),
+            '--lucifer-level', 'GATHERING',
+            '--autoserv-exit', str(autoserv_exit),
+            '--results-dir', results_dir,
+    ]
     output_file = os.path.join(results_dir, 'job_reporter_output.log')
     drone.spawn(_JOB_REPORTER_PATH, args, output_file=output_file)
     return drone
@@ -220,12 +254,18 @@ def _working_directory(job):
 def _get_consistent_execution_path(execution_entries):
     first_execution_path = execution_entries[0].execution_path()
     for execution_entry in execution_entries[1:]:
-        assert execution_entry.execution_path() == first_execution_path, (
-            '%s (%s) != %s (%s)' % (execution_entry.execution_path(),
-                                    execution_entry,
-                                    first_execution_path,
-                                    execution_entries[0]))
+        if execution_entry.execution_path() != first_execution_path:
+            raise _ExecutionPathError(
+                    '%s (%s) != %s (%s)'
+                    % (execution_entry.execution_path(),
+                       execution_entry,
+                       first_execution_path,
+                       execution_entries[0]))
     return first_execution_path
+
+
+class _ExecutionPathError(Exception):
+    """Raised by _get_consistent_execution_path()."""
 
 
 class Drone(object):
@@ -298,7 +338,9 @@ def _spawn(path, argv, output_file):
     """
     logger.info('Spawning %r, %r, %r', path, argv, output_file)
     assert all(isinstance(arg, basestring) for arg in argv)
-    if os.fork():
+    pid = os.fork()
+    if pid:
+        os.waitpid(pid, 0)
         return
     # Double fork to reparent to init since monitor_db does not reap.
     if os.fork():

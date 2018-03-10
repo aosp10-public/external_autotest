@@ -18,6 +18,8 @@ import socket
 import StringIO
 import subprocess
 import time
+import multiprocessing
+import ctypes
 
 from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib import global_config
@@ -530,8 +532,9 @@ def _install_system_update():
         subprocess.call(['sudo', _UPDATE_ENGINE_CLIENT, '--reboot'])
 
     except subprocess.CalledProcessError as e:
-        pass
-        #TODO(crbug/806311) surface error to UI
+        update_error = subprocess.check_output(
+            ['sudo', _UPDATE_ENGINE_CLIENT, '--last_attempt_error'])
+        raise error.RPCException(update_error)
 
 
 @rpc_utils.moblab_only
@@ -542,6 +545,9 @@ def get_connected_dut_info():
     """
     # Make a list of the connected DUT's
     leases = _get_dhcp_dut_leases()
+
+
+    connected_duts = _test_all_dut_connections(leases)
 
     # Get a list of the AFE configured DUT's
     hosts = list(rpc_utils.get_host_query((), False, True, {}))
@@ -558,7 +564,7 @@ def get_connected_dut_info():
 
     return rpc_utils.prepare_for_serialization(
             {'configured_duts': configured_duts,
-             'connected_duts': leases})
+             'connected_duts': connected_duts})
 
 
 def _get_dhcp_dut_leases():
@@ -579,6 +585,60 @@ def _get_dhcp_dut_leases():
              if mac_address_search:
                  leases[ipaddress] = mac_address_search.group(1)
      return leases
+
+def _test_all_dut_connections(leases):
+    """ Test ssh connection of all connected DUTs in parallel
+
+    @param leases: dict containing key value pairs of ip and mac address
+
+    @return: dict containing {
+        ip: {mac_address:[string], ssh_connection_ok:[boolean]}
+    }
+    """
+    # target function for parallel process
+    def _test_dut(ip, result):
+        result.value = _test_dut_ssh_connection(ip)
+
+    processes = []
+    for ip in leases:
+        # use a shared variable to get the ssh test result from child process
+        ssh_test_result = multiprocessing.Value(ctypes.c_bool)
+        # create a subprocess to test each DUT
+        process = multiprocessing.Process(
+            target=_test_dut, args=(ip, ssh_test_result))
+        process.start()
+
+        processes.append({
+            'ip': ip,
+            'ssh_test_result': ssh_test_result,
+            'process': process
+        })
+
+    connected_duts = {}
+    for process in processes:
+        process['process'].join()
+        ip = process['ip']
+        connected_duts[ip] = {
+            'mac_address': leases[ip],
+            'ssh_connection_ok': process['ssh_test_result'].value
+        }
+
+    return connected_duts
+
+
+def _test_dut_ssh_connection(ip):
+    """ Test if a connected dut is accessible via ssh.
+    The primary use case is to verify that the dut has a test image.
+
+    @return: True if the ssh connection is good False else
+    """
+    cmd = ('ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no '
+            "root@%s 'timeout 2 cat /etc/lsb-release'") % ip
+    try:
+        release = subprocess.check_output(cmd, shell=True)
+        return 'CHROMEOS_RELEASE_APPID' in release
+    except:
+        return False
 
 
 @rpc_utils.moblab_only
@@ -836,9 +896,16 @@ def _get_builds_for_in_directory(directory_name, milestone_limit=3,
     """
     output = StringIO.StringIO()
     gs_image_location =_CONFIG.get_config_value('CROS', _IMAGE_STORAGE_SERVER)
-    utils.run(GsUtil.get_gsutil_cmd(),
-              args=('ls', gs_image_location + directory_name),
-              stdout_tee=output)
+    try:
+        utils.run(GsUtil.get_gsutil_cmd(),
+                  args=('ls', gs_image_location + directory_name),
+                  stdout_tee=output)
+    except error.CmdError as e:
+        error_text = ('Failed to list builds from %s.\n'
+                'Did you configure your boto key? Try running the config '
+                'wizard again.\n\n%s') % ((gs_image_location + directory_name),
+                    e.result_obj.stderr)
+        raise error.RPCException(error_text)
     lines = output.getvalue().split('\n')
     output.close()
     builds = [line.replace(gs_image_location,'').strip('/ ')
@@ -944,7 +1011,7 @@ def run_suite(board, build, suite, model=None, ro_firmware=None,
 
     ap_name =_CONFIG.get_config_value('MOBLAB', _WIFI_AP_NAME, default=None)
     test_args['ssid'] = ap_name
-    ap_pass =_CONFIG.get_config_value('MOBLAB', _WIFI_AP_PASS, default=None)
+    ap_pass =_CONFIG.get_config_value('MOBLAB', _WIFI_AP_PASS, default='')
     test_args['wifipass'] = ap_pass
 
     afe = frontend.AFE(user='moblab')

@@ -21,6 +21,10 @@ DISPLAY_POWER_INTERNAL_ON_EXTERNAL_OFF = 3
 # for bounds checking
 DISPLAY_POWER_MAX = 4
 
+# Retry times for ectool chargecontrol
+ECTOOL_CHARGECONTROL_RETRY_TIMES = 3
+ECTOOL_CHARGECONTROL_TIMEOUT_SECS = 3
+
 
 def get_x86_cpu_arch():
     """Identify CPU architectural type.
@@ -48,6 +52,11 @@ def get_x86_cpu_arch():
         return 'Celeron N3000'
     if re.search(r'Intel.*Celeron.*[0-9]{3,4}', cpuinfo):
         return 'Celeron'
+    # https://ark.intel.com/products/series/94028/5th-Generation-Intel-Core-M-Processors
+    # https://ark.intel.com/products/series/94025/6th-Generation-Intel-Core-m-Processors
+    # https://ark.intel.com/products/series/95542/7th-Generation-Intel-Core-m-Processors
+    if re.search(r'Intel.*Core.*[mM][357]-[567][Y0-9][0-9][0-9]', cpuinfo):
+        return 'Core M'
     if re.search(r'Intel.*Core.*i[357]-[234][0-9][0-9][0-9]', cpuinfo):
         return 'Core'
 
@@ -172,8 +181,26 @@ def has_battery():
     return rv
 
 
-def charge_control_by_ectool(is_charge):
-    """Force the battery behavior by the is_charge paremeter.
+def get_low_battery_shutdown_percent():
+    """Get the percent-based low-battery shutdown threshold.
+
+    Returns:
+        Float, percent-based low-battery shutdown threshold. 0 if error.
+    """
+    ret = 0.0
+    try:
+        command = 'check_powerd_config --low_battery_shutdown_percent'
+        ret = float(utils.run(command).stdout)
+    except error.CmdError:
+        logging.debug("Can't run %s", command)
+    except ValueError:
+        logging.debug("Didn't get number from %s", command)
+
+    return ret
+
+
+def _charge_control_by_ectool(is_charge):
+    """execute ectool command.
 
     Args:
       is_charge: Boolean, True for charging, False for discharging.
@@ -183,18 +210,38 @@ def charge_control_by_ectool(is_charge):
     """
     ec_cmd_discharge = 'ectool chargecontrol discharge'
     ec_cmd_normal = 'ectool chargecontrol normal'
-    if is_charge:
-        utils.run(ec_cmd_normal)
-    else:
-        utils.run(ec_cmd_discharge)
+    try:
+       if is_charge:
+           utils.run(ec_cmd_normal)
+       else:
+           utils.run(ec_cmd_discharge)
+    except error.CmdError as e:
+        logging.warning('Unable to use ectool: %s', e)
+        return False
 
     success = utils.wait_for_value(lambda: (
         is_charge != bool(re.search(r'Flags.*DISCHARGING',
                                     utils.run('ectool battery',
                                               ignore_status=True).stdout,
                                     re.MULTILINE))),
-        expected_value=True)
+        expected_value=True, timeout_sec=ECTOOL_CHARGECONTROL_TIMEOUT_SECS)
     return success
+
+
+def charge_control_by_ectool(is_charge):
+    """Force the battery behavior by the is_charge paremeter.
+
+    Args:
+      is_charge: Boolean, True for charging, False for discharging.
+
+    Returns:
+      Boolean, True if the command success, False otherwise.
+    """
+    for i in xrange(ECTOOL_CHARGECONTROL_RETRY_TIMES):
+        if _charge_control_by_ectool(is_charge):
+            return True
+
+    return False
 
 
 class BacklightException(Exception):

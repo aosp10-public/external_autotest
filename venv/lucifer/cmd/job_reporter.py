@@ -26,6 +26,7 @@ import sys
 from lucifer import autotest
 from lucifer import eventlib
 from lucifer import handlers
+from lucifer import jobx
 from lucifer import leasing
 from lucifer import loglib
 
@@ -49,18 +50,32 @@ def main(args):
 def _parse_args_and_configure_logging(args):
     parser = argparse.ArgumentParser(prog='job_reporter', description=__doc__)
     loglib.add_logging_options(parser)
-    parser.add_argument('--run-job-path', default='/usr/bin/lucifer_run_job',
-                        help='Path to lucifer_run_job binary')
+
+    # General configuration
     parser.add_argument('--jobdir', default='/usr/local/autotest/leases',
                         help='Path to job leases directory.')
-    parser.add_argument('--job-id', type=int, default=None, required=True,
+    parser.add_argument('--run-job-path', default='/usr/bin/lucifer_run_job',
+                        help='Path to lucifer_run_job binary')
+    parser.add_argument('--watcher-path', default='/usr/bin/lucifer_watcher',
+                        help='Path to lucifer_watcher binary')
+
+    # Job specific
+    parser.add_argument('--job-id', type=int, required=True,
                         help='Autotest Job ID')
+    parser.add_argument('--lucifer-level', required=True,
+                        help='Lucifer level')
     parser.add_argument('--autoserv-exit', type=int, default=None, help='''
 autoserv exit status.  If this is passed, then autoserv will not be run
 as the caller has presumably already run it.
 ''')
-    parser.add_argument('run_job_args', nargs='*',
-                        help='Arguments to pass to lucifer_run_job')
+    parser.add_argument('--need-gather', action='store_true',
+                        help='Whether to gather logs'
+                        ' (only with --lucifer-level GATHERING)')
+    parser.add_argument('--num-tests-failed', type=int, default=-1,
+                        help='Number of tests failed'
+                        ' (only with --need-gather)')
+    parser.add_argument('--results-dir', required=True,
+                        help='Path to job leases directory.')
     args = parser.parse_args(args)
     loglib.configure_logging_with_args(parser, args)
     return args
@@ -74,14 +89,22 @@ def _main(args):
     ts_mon_config = autotest.chromite_load('ts_mon_config')
     metrics = autotest.chromite_load('metrics')
     with ts_mon_config.SetupTsMonGlobalState(
-            'autotest_scheduler', short_lived=True):
+            'job_reporter', short_lived=True):
         atexit.register(metrics.Flush)
-        handler = _make_handler(args)
-        _add_run_job_args(args)
-        ret = _run_job(args.run_job_path, handler, args)
-        if handler.completed:
-            _mark_handoff_completed(args.job_id)
-        return ret
+        return _run_autotest_job(args)
+
+
+def _run_autotest_job(args):
+    """Run a job as seen from Autotest.
+
+    This include some Autotest setup and cleanup around lucifer starting
+    proper.
+    """
+    handler = _make_handler(args)
+    ret = _run_lucifer_job(handler, args)
+    if handler.completed:
+        _mark_handoff_completed(args.job_id)
+    return ret
 
 
 def _make_handler(args):
@@ -98,32 +121,36 @@ def _make_handler(args):
     )
 
 
-def _add_run_job_args(args):
-    """Add extra args to run_job_args."""
-    models = autotest.load('frontend.afe.models')
-    job = models.Job.objects.get(id=args.job_id)
-    args.run_job_args.extend([
-            '-x-autoserv-exit', str(args.autoserv_exit),
-            '-x-hosts', ','.join(_job_hostnames(job))
-    ])
-
-
-def _run_job(path, event_handler, args):
+def _run_lucifer_job(event_handler, args):
     """Run lucifer_run_job.
 
     Issued events will be handled by event_handler.
 
-    @param path: path to lucifer_run_job binary
     @param event_handler: callable that takes an Event
     @param args: parsed arguments
     @returns: exit status of lucifer_run_job
     """
-    command_args = [path]
-    command_args.extend(
-            ['-abortsock', _abort_sock_path(args.jobdir, args.job_id)])
-    command_args.extend(args.run_job_args)
-    return eventlib.run_event_command(event_handler=event_handler,
-                                      args=command_args)
+    models = autotest.load('frontend.afe.models')
+    command_args = [args.run_job_path]
+    job = models.Job.objects.get(id=args.job_id)
+    command_args.extend([
+            '-autotestdir', autotest.AUTOTEST_DIR,
+            '-watcherpath', args.watcher_path,
+
+            '-abortsock', _abort_sock_path(args.jobdir, args.job_id),
+            '-hosts', ','.join(jobx.hostnames(job)),
+
+            '-x-level', args.lucifer_level,
+            '-x-resultsdir', args.results_dir,
+            '-x-autoserv-exit', str(args.autoserv_exit),
+    ])
+    if args.need_gather:
+        command_args.extend([
+                '-x-need-gather',
+                '-x-num-tests-failed', str(args.num_tests_failed),
+        ])
+    return eventlib.run_event_command(
+            event_handler=event_handler, args=command_args)
 
 
 def _mark_handoff_completed(job_id):
@@ -131,15 +158,6 @@ def _mark_handoff_completed(job_id):
     handoff = models.JobHandoff.objects.get(job_id=job_id)
     handoff.completed = True
     handoff.save()
-
-
-def _job_hostnames(job):
-    """Return a list of hostnames for a Job.
-
-    @param job: frontend.afe.models.Job instance
-    """
-    hqes = job.hostqueueentry_set.all().prefetch_related('host')
-    return [hqe.host.hostname for hqe in hqes if hqe.host is not None]
 
 
 def _abort_sock_path(jobdir, job_id):

@@ -215,8 +215,10 @@ class provision_Cr50Update(Cr50Test):
             failed.append('cr50 image board id')
         if self.image_rw != state['running_ver'][1]:
             failed.append('cr50 image version')
-        if self.image_ver != state['device_image_ver']:
-            failed.append('device image')
+        if self.image_ver != state['device_prod_ver']:
+            failed.append('device prod image')
+        if self.image_ver != state['device_prepvt_ver']:
+            failed.append('device prepvt image')
         if len(failed):
             raise error.TestFail('Update failures: %s', ', '.join(failed))
 
@@ -243,11 +245,14 @@ class provision_Cr50Update(Cr50Test):
         if need_rollback and not self.has_saved_cr50_dev_path():
             raise error.TestFail('Need a dev image to rollback to %s or update'
                                  'the board id')
-        # Copy the image onto the DUT. The image is stored in
-        # /opt/google/cr50/firmware/cr50.bin.prod, so rootfs verification has
-        # to be disabled before the copy.
+        # Copy the image onto the DUT. cr50-update uses both cr50.bin.prod and
+        # cr50.bin.prepvt in /opt/google/cr50/firmware/, so copy it to both
+        # places. Rootfs verification has to be disabled to do the copy.
         self.rootfs_verification_disable()
-        cr50_utils.InstallImage(self.host, self.local_path)
+        cr50_utils.InstallImage(self.host, self.local_path,
+                cr50_utils.CR50_PREPVT)
+        cr50_utils.InstallImage(self.host, self.local_path,
+                cr50_utils.CR50_PROD)
 
         # Update to the dev image if there needs to be a rollback.
         if need_rollback:

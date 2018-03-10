@@ -24,8 +24,8 @@ _CTS_TIMEOUT_SECONDS = 3600
 # Public download locations for android cts bundles.
 _DL_CTS = 'https://dl.google.com/dl/android/cts/'
 _CTS_URI = {
-    'arm': _DL_CTS + 'android-cts-7.1_r13-linux_x86-arm.zip',
-    'x86': _DL_CTS + 'android-cts-7.1_r13-linux_x86-x86.zip',
+    'arm': _DL_CTS + 'android-cts-7.1_r14-linux_x86-arm.zip',
+    'x86': _DL_CTS + 'android-cts-7.1_r14-linux_x86-x86.zip',
     'media': _DL_CTS + 'android-cts-media-1.4.zip',
 }
 
@@ -231,7 +231,7 @@ class cheets_CTS_N(tradefed_test.TradefedTest):
 
         # On dev and beta channels timeouts are sharp, lenient on stable.
         self._timeout = timeout
-        if self._get_release_channel == 'stable':
+        if self._get_release_channel(self._host) == 'stable':
             self._timeout += 3600
         # Retries depend on channel.
         self._timeoutfactor = None

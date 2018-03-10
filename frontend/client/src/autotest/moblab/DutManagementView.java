@@ -222,7 +222,11 @@ public class DutManagementView extends TabView {
           if (info.getConfiguredIpsToLabels().keySet().contains(dutIpAddress)) {
             labelString = info.getConfiguredIpsToLabels().get(dutIpAddress);
           } else {
-            labelString = "DUT Not Configured in Autotest";
+            boolean sshOk =
+                info.getConnectedIpsToSshConnection().get(dutIpAddress);
+            labelString = sshOk ? "DUT Not Configured in Autotest" :
+                "Unable to connect to DUT over SSH, check device is powered " +
+                "on, connected and has a test image on it.";
           }
           addRow(row, dutIpAddress, info.getConnectedIpsToMacAddress().get(dutIpAddress), labelString);
           row++;

@@ -1414,6 +1414,16 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
                 lsb_release_content=self._get_lsb_release_content())
 
 
+    def get_release_builder_path(self):
+        """Get the value of CHROMEOS_RELEASE_BUILDER_PATH from lsb-release.
+
+        @returns The version string in lsb-release, under attribute
+                 CHROMEOS_RELEASE_BUILDER_PATH.
+        """
+        return lsbrelease_utils.get_chromeos_release_builder_path(
+                lsb_release_content=self._get_lsb_release_content())
+
+
     def get_chromeos_release_milestone(self):
         """Get the value of attribute CHROMEOS_RELEASE_BUILD_TYPE
         from lsb-release.
@@ -1441,20 +1451,28 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
                 host__hostname=self.hostname)
         mismatch_found = False
         if labels:
-            # Get CHROMEOS_RELEASE_VERSION from lsb-release, e.g., 6908.0.0.
-            # Note that it's different from cros-version label, which has
-            # builder and branch info, e.g.,
-            # cros-version:peppy-release/R43-6908.0.0
-            release_version = self.get_release_version()
+            # Ask the DUT for its canonical image name.  This will be in
+            # a form like this:  kevin-release/R66-10405.0.0
+            release_builder_path = self.get_release_builder_path()
             host_list = [self.hostname]
             for label in labels:
                 # Remove any cros-version label that does not match
-                # release_version.
+                # the DUT's installed image.
+                #
+                # TODO(jrbarnette):  Tests sent to the `arc-presubmit`
+                # pool install images matching the format above, but
+                # then apply a label with `-cheetsth` appended.  Probably,
+                # it's wrong for ARC presubmit testing to make that change,
+                # but until it's fixed, this code specifically excuses that
+                # behavior.
                 build_version = label.name[len(ds_constants.VERSION_PREFIX):]
-                if not utils.version_match(build_version, release_version):
-                    logging.warn('cros-version label "%s" does not match '
-                                 'release version %s. Removing the label.',
-                                 label.name, release_version)
+                if build_version.endswith('-cheetsth'):
+                    build_version = build_version[:-len('-cheetsth')]
+                if build_version != release_builder_path:
+                    logging.warn(
+                        'cros-version label "%s" does not match '
+                        'release_builder_path %s. Removing the label.',
+                        label.name, release_builder_path)
                     label.remove_hosts(hosts=host_list)
                     mismatch_found = True
         if mismatch_found:
@@ -2048,7 +2066,10 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
         @returns a string representing this host's ec version.
         """
         command = 'mosys ec info -s fw_version'
-        return self.run(command, ignore_status=True).stdout.strip()
+        result = self.run(command, ignore_status=True)
+        if result.exit_status != 0:
+            return ''
+        return result.stdout.strip()
 
 
     def get_firmware_version(self):
@@ -2067,7 +2088,10 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
         @returns a string representing this host's hardware revision.
         """
         command = 'mosys platform version'
-        return self.run(command, ignore_status=True).stdout.strip()
+        result = self.run(command, ignore_status=True)
+        if result.exit_status != 0:
+            return ''
+        return result.stdout.strip()
 
 
     def get_kernel_version(self):

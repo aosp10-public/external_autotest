@@ -63,7 +63,7 @@ class DisplayFacadeNative(object):
         @return array of dict for display info.
         """
         extension = self._resource.get_extension(
-                constants.MULTIMEDIA_TEST_EXTENSION)
+                constants.DISPLAY_TEST_EXTENSION)
         extension.ExecuteJavaScript('window.__display_info = null;')
         extension.ExecuteJavaScript(
                 "chrome.system.display.getInfo(function(info) {"
@@ -137,7 +137,7 @@ class DisplayFacadeNative(object):
         """
         time.sleep(delay_before_rotation)
         extension = self._resource.get_extension(
-                constants.MULTIMEDIA_TEST_EXTENSION)
+                constants.DISPLAY_TEST_EXTENSION)
         extension.ExecuteJavaScript(
                 """
                 window.__set_display_rotation_has_error = null;
@@ -170,9 +170,14 @@ class DisplayFacadeNative(object):
 
         @return a list of (width, height) tuples.
         """
-        modes = self.get_display_modes(display_id)
+        display = self._get_display_by_id(display_id)
+        modes = display['modes']
         if 'widthInNativePixels' not in modes[0]:
             raise RuntimeError('Cannot find widthInNativePixels attribute')
+        if display['isInternal']:
+            logging.info("Getting resolutions of internal display")
+            return list(set([(mode['width'], mode['height']) for mode in
+                             modes]))
         return list(set([(mode['widthInNativePixels'],
                           mode['heightInNativePixels']) for mode in modes]))
 
@@ -212,7 +217,7 @@ class DisplayFacadeNative(object):
         """
 
         extension = self._resource.get_extension(
-                constants.MULTIMEDIA_TEST_EXTENSION)
+                constants.DISPLAY_TEST_EXTENSION)
         extension.ExecuteJavaScript(
                 """
                 window.__set_resolution_progress = null;

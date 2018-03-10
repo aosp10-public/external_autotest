@@ -1,4 +1,5 @@
 import collections
+import logging
 
 
 PortId = collections.namedtuple('PortId', ['bus', 'port_number'])
@@ -8,11 +9,15 @@ PortId = collections.namedtuple('PortId', ['bus', 'port_number'])
 # specific setup is hard coded here.
 _PORT_ID_TO_GPIO_INDEX_DICT = {'guado': {
         # On Guados, there are three gpios that control usb port power:
-        PortId(bus=1, port_number=2): 218,  # Front left
-        PortId(bus=1, port_number=3): 219,  # Front right
+        PortId(bus=1, port_number=2): 218,  # Front left USB 2
+        PortId(bus=2, port_number=1): 218,  # Front left USB 3
+        PortId(bus=1, port_number=3): 219,  # Front right USB 2
+        PortId(bus=2, port_number=2): 219,  # Front right USB 3
         # Back ports (same GPIO is used for both ports)
-        PortId(bus=1, port_number=5): 209,
-        PortId(bus=1, port_number=6): 209
+        PortId(bus=1, port_number=5): 209,  # Back upper USB 2
+        PortId(bus=2, port_number=3): 209,  # Back upper USB 3
+        PortId(bus=1, port_number=6): 209,  # Back lower USB 2
+        PortId(bus=2, port_number=4): 209,  # Back lower USB 3
     }
 }
 
@@ -62,15 +67,20 @@ class UsbPortManager(object):
         did_export = False
         if not self._host.path_exists(gpio_path):
             did_export = True
-            self._host.run('echo {} > /sys/class/gpio/export'.format(
+            self._run('echo {} > /sys/class/gpio/export'.format(
                     gpio_index))
         try:
-            self._host.run('echo out > {}/direction'.format(gpio_path))
+            self._run('echo out > {}/direction'.format(gpio_path))
             value_string = '1' if power_on else '0'
-            self._host.run('echo {} > {}/value'.format(
+            self._run('echo {} > {}/value'.format(
                     value_string, gpio_path))
         finally:
             if did_export:
-                self._host.run('echo {} > /sys/class/gpio/unexport'.format(
+                self._run('echo {} > /sys/class/gpio/unexport'.format(
                         gpio_index))
+
+    def _run(self, command):
+        logging.debug('Running: "%s"', command)
+        res = self._host.run(command)
+        logging.debug('Result: "%s"', res)
 
