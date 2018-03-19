@@ -20,10 +20,8 @@ class camera_HAL3(test.test):
     dep = 'camera_hal3'
     adapter_service = 'camera-halv3-adapter'
     timeout = 600
-    media_profiles_path = os.path.join(os.path.sep, 'opt', 'google',
-                                       'containers', 'android', 'rootfs',
-                                       'root', 'vendor', 'etc',
-                                       'media_profiles.xml')
+    media_profiles_path = os.path.join('vendor', 'etc', 'media_profiles.xml')
+    tablet_board_list = ['scarlet']
 
     def setup(self):
         """
@@ -41,8 +39,10 @@ class camera_HAL3(test.test):
 
         with service_stopper.ServiceStopper([self.adapter_service]):
             cmd = [ os.path.join(self.dep_dir, 'bin', self.test_binary) ]
-            tree = xml.etree.ElementTree.parse(self.media_profiles_path)
-            root = tree.getroot()
+            xml_content = utils.system_output(
+                ' '.join(['android-sh', '-c', '\"cat',
+                          self.media_profiles_path + '\"']))
+            root = xml.etree.ElementTree.fromstring(xml_content)
             recording_params = Set()
             for camcorder_profiles in root.findall('CamcorderProfiles'):
                 for encoder_profile in camcorder_profiles.findall('EncoderProfile'):
@@ -52,5 +52,7 @@ class camera_HAL3(test.test):
                         video.get('height'), video.get('frameRate')))
             if recording_params:
                 cmd.append('--recording_params=' + ','.join(recording_params))
+            if utils.get_current_board() in self.tablet_board_list:
+                cmd.append('--gtest_filter=-*SensorOrientationTest/*')
 
             utils.system(' '.join(cmd), timeout=self.timeout)
