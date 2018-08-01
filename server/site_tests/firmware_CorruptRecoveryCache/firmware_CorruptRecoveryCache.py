@@ -21,7 +21,7 @@ class firmware_CorruptRecoveryCache(FirmwareTest):
 
     REBUILD_CACHE_MSG = "MRC: cache data 'RECOVERY_MRC_CACHE' needs update."
     RECOVERY_CACHE_SECTION = 'RECOVERY_MRC_CACHE'
-    FIRMWARE_LOG_CMD = 'cbmem -c'
+    FIRMWARE_LOG_CMD = 'cbmem -1' + ' | grep ' + REBUILD_CACHE_MSG[:3]
     FMAP_CMD = 'mosys eeprom map'
 
     def initialize(self, host, cmdline_args, dev_mode=False):
@@ -33,7 +33,8 @@ class firmware_CorruptRecoveryCache(FirmwareTest):
 
     def cleanup(self):
         try:
-            self.restore_firmware()
+            if self.is_firmware_saved():
+                self.restore_firmware()
         except ConnectionError:
             logging.error("ERROR: DUT did not come up.  Need to cleanup!")
         super(firmware_CorruptRecoveryCache, self).cleanup()

@@ -38,6 +38,7 @@ class _PowerStateController(object):
 
     REC_ON = 'rec'
     REC_OFF = 'on'
+    REC_ON_FORCE_MRC = 'rec_force_mrc'
 
     # Delay in seconds needed between asserting and de-asserting
     # warm reset.
@@ -526,11 +527,11 @@ class Servo(object):
         @param gpio_value New setting for the gpio.
         """
         assert gpio_name and gpio_value
-        logging.info('Setting %s to %s', gpio_name, gpio_value)
+        logging.info('Setting %s to %r', gpio_name, gpio_value)
         try:
             self._server.set(gpio_name, gpio_value)
         except  xmlrpclib.Fault as e:
-            err_msg = "Setting '%s' to '%s' :: %s" % \
+            err_msg = "Setting '%s' to %r :: %s" % \
                 (gpio_name, gpio_value, self._get_xmlrpclib_exception(e))
             raise error.TestFail(err_msg)
 
@@ -623,6 +624,11 @@ class Servo(object):
                     logging.error('Failed to make image noninteractive. '
                                   'Please take a look at Servo Logs.')
 
+    def boot_in_recovery_mode(self):
+        """Boot host DUT in recovery mode."""
+        self._power_state.power_on(rec_mode=self._power_state.REC_ON)
+        self.switch_usbkey('dut')
+
 
     def install_recovery_image(self, image_path=None,
                                make_image_noninteractive=False):
@@ -639,8 +645,7 @@ class Servo(object):
                 after installation.
         """
         self.image_to_servo_usb(image_path, make_image_noninteractive)
-        self._power_state.power_on(rec_mode=self._power_state.REC_ON)
-        self.switch_usbkey('dut')
+        self.boot_in_recovery_mode()
 
 
     def _scp_image(self, image_path):

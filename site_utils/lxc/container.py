@@ -72,11 +72,15 @@ class ContainerId(collections.namedtuple('ContainerId',
 
         try:
             with open(src, 'r') as f:
-                return cls(*json.load(f))
+                job_id, ctime, pid = json.load(f)
         except IOError:
             # File not found, or couldn't be opened for some other reason.
             # Treat all these cases as no ID.
             return None
+        # TODO(pprabhu, crbug.com/842343) Remove this once all persistent
+        # container ids have migrated to str.
+        job_id = str(job_id)
+        return cls(job_id, ctime, pid)
 
 
     @classmethod
@@ -93,7 +97,9 @@ class ContainerId(collections.namedtuple('ContainerId',
             ctime = int(time.time())
         if pid is None:
             pid = os.getpid()
-        return cls(job_id, ctime, pid)
+        # TODO(pprabhu) Drop str() cast once
+        # job_directories.get_job_id_or_task_id() starts returning str directly.
+        return cls(str(job_id), ctime, pid)
 
 
 class Container(object):
@@ -119,6 +125,8 @@ class Container(object):
 
     The attributes available are defined in ATTRIBUTES constant.
     """
+
+    _LXC_VERSION = None
 
     def __init__(self, container_path, name, attribute_values, src=None,
                  snapshot=False):
@@ -170,6 +178,9 @@ class Container(object):
                 logging.exception('Error loading ID for container %s:',
                                   self.name)
                 self._id = None
+
+        if not Container._LXC_VERSION:
+          Container._LXC_VERSION = lxc_utils.get_lxc_version()
 
 
     @classmethod
@@ -284,8 +295,14 @@ class Container(object):
 
         @return: Path to the rootfs of the container.
         """
+        lxc_rootfs_config_name = 'lxc.rootfs'
+        # Check to see if the major lxc version is 3 or greater
+        if Container._LXC_VERSION:
+            logging.info("Detected lxc version %s", Container._LXC_VERSION)
+            if Container._LXC_VERSION[0] >= 3:
+                lxc_rootfs_config_name = 'lxc.rootfs.path'
         if not self._rootfs:
-            lxc_rootfs = self._get_lxc_config('lxc.rootfs')[0]
+            lxc_rootfs = self._get_lxc_config(lxc_rootfs_config_name)[0]
             cloned_from_snapshot = ':' in lxc_rootfs
             if cloned_from_snapshot:
                 self._rootfs = lxc_rootfs.split(':')[-1]

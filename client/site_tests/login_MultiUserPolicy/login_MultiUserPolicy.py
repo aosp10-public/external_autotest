@@ -2,10 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import dbus, os
+import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 
-from autotest_lib.client.bin import test, utils
+from autotest_lib.client.bin import test
 from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib.cros import policy, session_manager
 from autotest_lib.client.cros import cryptohome, ownership
@@ -21,20 +21,18 @@ class login_MultiUserPolicy(test.test):
     _user1 = 'user1@somewhere.com'
     _user2 = 'user2@somewhere.com'
 
-    def setup(self):
-        os.chdir(self.srcdir)
-        utils.make('OUT_DIR=.')
-
 
     def initialize(self):
         super(login_MultiUserPolicy, self).initialize()
+        policy.install_protobufs(self.autodir, self.job)
         self._bus_loop = DBusGMainLoop(set_as_default=True)
 
         # Clear the user's vault, to make sure the test starts without any
         # policy or key lingering around. At this stage the session isn't
         # started and there's no user signed in.
         ownership.restart_ui_to_clear_ownership_files()
-        cryptohome_proxy = cryptohome.CryptohomeProxy(self._bus_loop)
+        cryptohome_proxy = cryptohome.CryptohomeProxy(
+            self._bus_loop, self.autodir, self.job)
         cryptohome_proxy.ensure_clean_cryptohome_for(self._user1)
         cryptohome_proxy.ensure_clean_cryptohome_for(self._user2)
 
@@ -54,9 +52,8 @@ class login_MultiUserPolicy(test.test):
         # outer PolicyFetchResponse that contains the public_key.
         public_key = ownership.known_pubkey()
         private_key = ownership.known_privkey()
-        policy_data = policy.build_policy_data(self.srcdir)
-        policy_response = policy.generate_policy(self.srcdir,
-                                                 private_key,
+        policy_data = policy.build_policy_data()
+        policy_response = policy.generate_policy(private_key,
                                                  public_key,
                                                  policy_data)
         try:

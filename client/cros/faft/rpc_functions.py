@@ -8,6 +8,7 @@ These can be exposed via a xmlrpci server running on the DUT.
 """
 
 import functools, os, tempfile
+import traceback
 
 from autotest_lib.client.cros.faft.utils import (cgpt_handler,
                                                  common,
@@ -143,9 +144,15 @@ class RPCFunctions(object):
         if is_str:
             return str(func)
         else:
-            self._os_if.log('Dispatching method %s with args %r' %
+            try:
+                self._os_if.log('Dispatching method %s with args %r' %
                     (func.__name__, params))
-            return func(*params)
+                return func(*params)
+            except:
+                self._os_if.log(
+                    'Dispatching of method %s failed: %s' %
+                    (func.__name__, traceback.format_exc()))
+                raise
 
     def _system_is_available(self):
         """Function for polling the RPC server availability.
@@ -710,11 +717,11 @@ class RPCFunctions(object):
         return self._updater.start_daemon()
 
     def _updater_get_fwid(self):
-        """Retrieve shellball's fwid.
+        """Retrieve shellball's RW fwid.
 
-        @return: Shellball's fwid.
+        @return: Shellball's RW fwid.
         """
-        return self._updater.retrieve_fwid()
+        return self._updater.retrieve_fwid()[1]
 
     def _updater_get_ecid(self):
         """Retrieve shellball's ecid.

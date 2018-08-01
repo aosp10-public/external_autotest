@@ -50,7 +50,8 @@ class power_LoadTest(arc.ArcTest):
                  verbose=True, force_wifi=False, wifi_ap='', wifi_sec='none',
                  wifi_pw='', wifi_timeout=60, tasks='',
                  volume_level=10, mic_gain=10, low_batt_margin_p=2,
-                 ac_ok=False, log_mem_bandwidth=False, gaia_login=True):
+                 ac_ok=False, log_mem_bandwidth=False, gaia_login=None,
+                 force_discharge=False):
         """
         percent_initial_charge_min: min battery charge at start of test
         check_network: check that Ethernet interface is not running
@@ -74,7 +75,10 @@ class power_LoadTest(arc.ArcTest):
             sys_low_batt_p to guarantee test completes prior to powerd shutdown
         ac_ok: boolean to allow running on AC
         log_mem_bandwidth: boolean to log memory bandwidth during the test
-        gaia_login: boolean of whether real GAIA login should be attempted.
+        gaia_login: whether real GAIA login should be attempted.  If 'None'
+            (default) then boolean is determined from URL.
+        force_discharge: boolean of whether to tell ec to discharge battery even
+            when the charger is plugged in.
         """
         self._backlight = None
         self._services = None
@@ -105,7 +109,7 @@ class power_LoadTest(arc.ArcTest):
         self._log_mem_bandwidth = log_mem_bandwidth
         self._wait_time = 60
         self._stats = collections.defaultdict(list)
-        self._gaia_login = gaia_login
+        self._force_discharge = force_discharge
 
         if not power_utils.has_battery():
             if ac_ok and (power_utils.has_powercap_support() or
@@ -117,11 +121,20 @@ class power_LoadTest(arc.ArcTest):
         self._power_status = power_status.get_status()
         self._tmp_keyvals['b_on_ac'] = self._power_status.on_ac()
 
+        self._gaia_login = gaia_login
+        if gaia_login is None:
+            self._gaia_login = power_load_util.use_gaia_login()
+
         self._username = power_load_util.get_username()
         self._password = power_load_util.get_password()
 
         if not ac_ok:
             self._power_status.assert_battery_state(percent_initial_charge_min)
+
+        if force_discharge:
+            if not power_utils.charge_control_by_ectool(False):
+                raise error.TestError('Could not run battery force discharge.')
+
         # If force wifi enabled, convert eth0 to backchannel and connect to the
         # specified WiFi AP.
         if self._force_wifi:
@@ -172,7 +185,7 @@ class power_LoadTest(arc.ArcTest):
             # Find all wired ethernet interfaces.
             ifaces = [ iface for iface in interface.get_interfaces()
                 if (not iface.is_wifi_device() and
-                    iface.name.find('eth') != -1) ]
+                    iface.name.startswith('eth')) ]
             logging.debug(str([iface.name for iface in ifaces]))
             for iface in ifaces:
                 if check_network and iface.is_lower_up:
@@ -254,8 +267,10 @@ class power_LoadTest(arc.ArcTest):
             measurements += power_rapl.create_rapl()
         self._plog = power_status.PowerLogger(measurements, seconds_period=20)
         self._tlog = power_status.TempLogger([], seconds_period=20)
+        self._clog = power_status.CPUStatsLogger(seconds_period=20)
         self._plog.start()
         self._tlog.start()
+        self._clog.start()
         if self._log_mem_bandwidth:
             self._mlog = memory_bandwidth_logger.MemoryBandwidthLogger(
                 raw=False, seconds_period=2)
@@ -267,6 +282,7 @@ class power_LoadTest(arc.ArcTest):
         arc_mode = arc_common.ARC_MODE_DISABLED
         if utils.is_arc_available():
             arc_mode = arc_common.ARC_MODE_ENABLED
+        self._detachable_handler = power_utils.BaseActivitySimulator()
 
         try:
             self._browser = chrome.Chrome(extension_paths=[ext_path],
@@ -315,9 +331,24 @@ class power_LoadTest(arc.ArcTest):
             pagelt_tracking = self._testServer.add_wait_url(url='/pagelt')
 
             self._testServer.add_url_handler(url='/pagelt',\
-                handler_func=(lambda handler, forms, tracker=self, loop_counter=i:\
-                    _extension_page_load_info_handler(handler, forms, loop_counter, self)))
+                handler_func=(lambda handler, forms, tracker=self,
+                              loop_counter=i:\
+                    _extension_page_load_info_handler(handler, forms,
+                                                      loop_counter, self)))
 
+            # setup a handler to simulate waking up the base of a detachable
+            # on user interaction. On scrolling, wake for 1s, on page
+            # navigation, wake for 10s.
+            self._testServer.add_url(url='/pagenav')
+            self._testServer.add_url(url='/scroll')
+
+            self._testServer.add_url_handler(url='/pagenav',
+                handler_func=(lambda handler, args, plt=self:
+                              plt._detachable_handler.wake_base(10000)))
+
+            self._testServer.add_url_handler(url='/scroll',
+                handler_func=(lambda handler, args, plt=self:
+                              plt._detachable_handler.wake_base(1000)))
             # reset backlight level since powerd might've modified it
             # based on ambient light
             self._set_backlight_level()
@@ -381,6 +412,7 @@ class power_LoadTest(arc.ArcTest):
 
         keyvals = self._plog.calc()
         keyvals.update(self._tlog.calc())
+        keyvals.update(self._clog.calc())
         keyvals.update(self._statomatic.publish())
 
         if self._log_mem_bandwidth:
@@ -468,16 +500,23 @@ class power_LoadTest(arc.ArcTest):
         self.write_perf_keyval(keyvals)
         self._plog.save_results(self.resultsdir)
         self._tlog.save_results(self.resultsdir)
+        self._clog.save_results(self.resultsdir)
         pdash = power_dashboard.PowerLoggerDashboard( \
                 self._plog, self.tagged_testname, self.resultsdir)
         pdash.upload()
+        cdash = power_dashboard.CPUStatsLoggerDashboard( \
+                self._clog, self.tagged_testname, self.resultsdir)
+        cdash.upload()
 
 
     def cleanup(self):
+        if self._force_discharge:
+            power_utils.charge_control_by_ectool(True)
         if self._backlight:
             self._backlight.restore()
         if self._services:
             self._services.restore_services()
+        self._detachable_handler.restore()
 
         # cleanup backchannel interface
         # Prevent wifi congestion in test lab by forcing machines to forget the
@@ -540,7 +579,6 @@ class power_LoadTest(arc.ArcTest):
             logging.debug("Didn't get status back from power extension")
 
         return low_battery
-
 
     def _set_backlight_level(self):
         self._backlight.set_default()

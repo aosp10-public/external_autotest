@@ -1002,40 +1002,6 @@ class GetFunctionArgUnittest(unittest.TestCase):
         self.run_test(TestClass.test_static_function, False)
 
 
-class VersionMatchUnittest(unittest.TestCase):
-    """Test version_match function."""
-
-    def test_version_match(self):
-        """Test version_match function."""
-        canary_build = 'lumpy-release/R43-6803.0.0'
-        canary_release = '6803.0.0'
-        cq_build = 'lumpy-release/R43-6803.0.0-rc1'
-        cq_release = '6803.0.0-rc1'
-        trybot_paladin_build = 'trybot-lumpy-paladin/R43-6803.0.0-b123'
-        trybot_paladin_release = '6803.0.2015_03_12_2103'
-        trybot_pre_cq_build = 'trybot-wifi-pre-cq/R43-7000.0.0-b36'
-        trybot_pre_cq_release = '7000.0.2016_03_12_2103'
-        trybot_toolchain_build = 'trybot-nyan_big-gcc-toolchain/R56-8936.0.0-b14'
-        trybot_toolchain_release = '8936.0.2016_10_26_1403'
-        cros_cheets_build = 'lumpy-release/R49-6899.0.0-cheetsth'
-        cros_cheets_release = '6899.0.0'
-        trybot_paladin_cheets_build = 'trybot-lumpy-paladin/R50-6900.0.0-b123-cheetsth'
-        trybot_paladin_cheets_release = '6900.0.2015_03_12_2103'
-
-        builds = [canary_build, cq_build, trybot_paladin_build,
-                  trybot_pre_cq_build, trybot_toolchain_build,
-                  cros_cheets_build, trybot_paladin_cheets_build]
-        releases = [canary_release, cq_release, trybot_paladin_release,
-                    trybot_pre_cq_release, trybot_toolchain_release,
-                    cros_cheets_release, trybot_paladin_cheets_release]
-        for i in range(len(builds)):
-            for j in range(len(releases)):
-                self.assertEqual(
-                        utils.version_match(builds[i], releases[j]), i==j,
-                        'Build version %s should%s match release version %s.' %
-                        (builds[i], '' if i==j else ' not', releases[j]))
-
-
 class IsInSameSubnetUnittest(unittest.TestCase):
     """Test is_in_same_subnet function."""
 
@@ -1189,6 +1155,53 @@ class  MockMetricsTest(unittest.TestCase):
         timer = metrics.SecondsTimer('name')
         timer['random_key'] = 'pass'
 
+
+class test_background_sample(unittest.TestCase):
+    """Test that the background sample can sample as desired.
+    """
+
+    def test_can_sample(self):
+        """Test that a simple sample will work with no other complications.
+        """
+        should_be_sampled = 'name'
+
+        def sample_function():
+            """Return value of variable stored in method."""
+            return should_be_sampled
+        still_sampling = True
+
+        t = utils.background_sample_until_condition(
+                function=sample_function,
+                condition=lambda: still_sampling,
+                timeout=5,
+                sleep_interval=0.1)
+        result = t.finish()
+        self.assertIn(should_be_sampled, result)
+
+
+    def test_samples_multiple_values(self):
+        """Test that a sample will work and actually samples at the necessary
+        intervals, such that it will pick up changes.
+        """
+        should_be_sampled = 'name'
+
+        def sample_function():
+            """Return value of variable stored in method."""
+            return should_be_sampled
+        still_sampling = True
+
+        t = utils.background_sample_until_condition(
+                function=sample_function,
+                condition=lambda: still_sampling,
+                timeout=5,
+                sleep_interval=0.1)
+        # Let it sample values some with the initial value.
+        time.sleep(2.5)
+        # It should also sample some with the new value.
+        should_be_sampled = 'noname'
+        result = t.finish()
+        self.assertIn('name', result)
+        self.assertIn('noname', result)
 
 
 if __name__ == "__main__":

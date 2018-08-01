@@ -59,6 +59,7 @@ class display_Resolution(test.test):
             raise error.TestNAError(
                     'DUT is incompatible with servo. Skipping test.')
 
+        self.host = host
         factory = remote_facade_factory.RemoteFacadeFactory(host)
         display_facade = factory.create_display_facade()
         chameleon_board = host.chameleon
@@ -139,3 +140,11 @@ class display_Resolution(test.test):
 
         if errors:
             raise error.TestFail('; '.join(set(errors)))
+
+    def cleanup(self):
+        """Test cleanup"""
+        # Keep device in lid open sate.
+        if self.host.servo:
+            logging.info('Open lid...')
+            self.host.servo.lid_open()
+            time.sleep(self.WAIT_TIME_LID_TRANSITION)

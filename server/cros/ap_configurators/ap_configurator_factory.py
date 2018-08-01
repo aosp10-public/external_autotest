@@ -5,6 +5,7 @@
 """File containing class to build all available ap_configurators."""
 
 import logging
+import requests
 
 from autotest_lib.client.common_lib.cros.network import ap_constants
 from autotest_lib.server import site_utils
@@ -12,6 +13,8 @@ from autotest_lib.server.cros import ap_config
 from autotest_lib.server.cros.ap_configurators import ap_cartridge
 from autotest_lib.server.cros.ap_configurators import ap_spec
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
+
+CHAOS_URL = 'https://chaos-188802.appspot.com'
 
 
 class APConfiguratorFactory(object):

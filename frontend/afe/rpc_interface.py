@@ -50,7 +50,6 @@ from autotest_lib.client.common_lib import control_data
 from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib import global_config
 from autotest_lib.client.common_lib import priorities
-from autotest_lib.client.common_lib import time_utils
 from autotest_lib.client.common_lib.cros import dev_server
 from autotest_lib.frontend.afe import control_file as control_file_lib
 from autotest_lib.frontend.afe import model_attributes
@@ -64,7 +63,7 @@ from autotest_lib.server import utils
 from autotest_lib.server.cros import provision
 from autotest_lib.server.cros.dynamic_suite import constants
 from autotest_lib.server.cros.dynamic_suite import control_file_getter
-from autotest_lib.server.cros.dynamic_suite import suite as SuiteBase
+from autotest_lib.server.cros.dynamic_suite import suite_common
 from autotest_lib.server.cros.dynamic_suite import tools
 from autotest_lib.server.cros.dynamic_suite.suite import Suite
 from autotest_lib.server.lib import status_history
@@ -501,18 +500,15 @@ def host_add_labels(id, labels):
     label_objs = models.Label.smart_get_bulk(labels)
 
     platforms = [label.name for label in label_objs if label.platform]
-    boards = [label.name for label in label_objs
-              if label.name.startswith('board:')]
-    if len(platforms) > 1 or not utils.board_labels_allowed(boards):
+    if len(platforms) > 1:
         raise model_logic.ValidationError(
-            {'labels': ('Adding more than one platform label, or a list of '
-                        'non-compatible board labels.: %s %s' %
-                        (', '.join(platforms), ', '.join(boards)))})
+            {'labels': ('Adding more than one platform: %s' %
+                        ', '.join(platforms))})
 
     host_obj = models.Host.smart_get(id)
     if platforms:
         models.Host.check_no_platform([host_obj])
-    if boards:
+    if any(label_name.startswith('board:') for label_name in labels):
         models.Host.check_board_labels_allowed([host_obj], labels)
     add_labels_to_host(id, labels)
 
@@ -1713,9 +1709,7 @@ def get_static_data():
     label_exclude_filters = [{'name__startswith': 'cros-version'},
                              {'name__startswith': 'fw-version'},
                              {'name__startswith': 'fwrw-version'},
-                             {'name__startswith': 'fwro-version'},
-                             {'name__startswith': 'ab-version'},
-                             {'name__startswith': 'testbed-version'}]
+                             {'name__startswith': 'fwro-version'}]
     result['labels'] = get_labels(
         label_exclude_filters,
         sort_by=['-platform', 'name'])
@@ -1822,59 +1816,6 @@ def get_hosts_by_attribute(attribute, value):
         return [row.host.hostname for row in rows if row.host.invalid == 0]
 
 
-def canonicalize_suite_name(suite_name):
-    """Canonicalize the suite's name.
-
-    @param suite_name: the name of the suite.
-    """
-    # Do not change this naming convention without updating
-    # site_utils.parse_job_name.
-    return 'test_suites/control.%s' % suite_name
-
-
-def formatted_now():
-    """Format the current datetime."""
-    return datetime.datetime.now().strftime(time_utils.TIME_FMT)
-
-
-def _get_control_file_by_build(build, ds, suite_name):
-    """Return control file contents for |suite_name|.
-
-    Query the dev server at |ds| for the control file |suite_name|, included
-    in |build| for |board|.
-
-    @param build: unique name by which to refer to the image from now on.
-    @param ds: a dev_server.DevServer instance to fetch control file with.
-    @param suite_name: canonicalized suite name, e.g. test_suites/control.bvt.
-    @raises ControlFileNotFound if a unique suite control file doesn't exist.
-    @raises NoControlFileList if we can't list the control files at all.
-    @raises ControlFileEmpty if the control file exists on the server, but
-                             can't be read.
-
-    @return the contents of the desired control file.
-    """
-    getter = control_file_getter.DevServerGetter.create(build, ds)
-    devserver_name = ds.hostname
-    # Get the control file for the suite.
-    try:
-        control_file_in = getter.get_control_file_contents_by_name(suite_name)
-    except error.CrosDynamicSuiteException as e:
-        raise type(e)('Failed to get control file for %s '
-                      '(devserver: %s) (error: %s)' %
-                      (build, devserver_name, e))
-    if not control_file_in:
-        raise error.ControlFileEmpty(
-            "Fetching %s returned no data. (devserver: %s)" %
-            (suite_name, devserver_name))
-    # Force control files to only contain ascii characters.
-    try:
-        control_file_in.encode('ascii')
-    except UnicodeDecodeError as e:
-        raise error.ControlFileMalformed(str(e))
-
-    return control_file_in
-
-
 def _get_control_file_by_suite(suite_name):
     """Get control file contents by suite name.
 
@@ -1885,36 +1826,6 @@ def _get_control_file_by_suite(suite_name):
             [_CONFIG.get_config_value('SCHEDULER',
                                       'drone_installation_directory')])
     return getter.get_control_file_contents_by_name(suite_name)
-
-
-def _stage_build_artifacts(build, hostname=None):
-    """
-    Ensure components of |build| necessary for installing images are staged.
-
-    @param build image we want to stage.
-    @param hostname hostname of a dut may run test on. This is to help to locate
-        a devserver closer to duts if needed. Default is None.
-
-    @raises StageControlFileFailure: if the dev server throws 500 while staging
-        suite control files.
-
-    @return: dev_server.ImageServer instance to use with this build.
-    @return: timings dictionary containing staging start/end times.
-    """
-    timings = {}
-    # Ensure components of |build| necessary for installing images are staged
-    # on the dev server. However set synchronous to False to allow other
-    # components to be downloaded in the background.
-    ds = dev_server.resolve(build, hostname=hostname)
-    ds_name = ds.hostname
-    timings[constants.DOWNLOAD_STARTED_TIME] = formatted_now()
-    try:
-        ds.stage_artifacts(image=build, artifacts=['test_suites'])
-    except dev_server.DevServerException as e:
-        raise error.StageControlFileFailure(
-                "Failed to stage %s on %s: %s" % (build, ds_name, e))
-    timings[constants.PAYLOAD_FINISHED_TIME] = formatted_now()
-    return (ds, timings)
 
 
 @rpc_utils.route_rpc_to_master
@@ -2025,12 +1936,12 @@ def create_suite_job(
 
     sample_dut = rpc_utils.get_sample_dut(board, pool)
 
-    suite_name = canonicalize_suite_name(name)
+    suite_name = suite_common.canonicalize_suite_name(name)
     if run_prod_code:
         ds = dev_server.resolve(test_source_build, hostname=sample_dut)
         keyvals = {}
     else:
-        (ds, keyvals) = _stage_build_artifacts(
+        ds, keyvals = suite_common.stage_build_artifacts(
                 test_source_build, hostname=sample_dut)
     keyvals[constants.SUITE_MIN_DUTS_KEY] = suite_min_duts
 
@@ -2054,7 +1965,7 @@ def create_suite_job(
 
     if not control_file:
         # No control file was supplied so look it up from the build artifacts.
-        control_file = _get_control_file_by_build(
+        control_file = suite_common.get_control_file_by_build(
                 test_source_build, ds, suite_name)
 
     # Prepend builds and board to the control file.
@@ -2449,7 +2360,7 @@ def get_tests_by_build(build, ignore_invalid_tests=True):
     """
     # Collect the control files specified in this build
     cfile_getter = control_file_lib._initialize_control_file_getter(build)
-    if SuiteBase.ENABLE_CONTROLS_IN_BATCH:
+    if suite_common.ENABLE_CONTROLS_IN_BATCH:
         control_file_info_list = cfile_getter.get_suite_info()
         control_file_list = control_file_info_list.keys()
     else:
@@ -2459,7 +2370,7 @@ def get_tests_by_build(build, ignore_invalid_tests=True):
     _id = 0
     for control_file_path in control_file_list:
         # Read and parse the control file
-        if SuiteBase.ENABLE_CONTROLS_IN_BATCH:
+        if suite_common.ENABLE_CONTROLS_IN_BATCH:
             control_file = control_file_info_list[control_file_path]
         else:
             control_file = cfile_getter.get_control_file_contents(

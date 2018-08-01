@@ -6,6 +6,7 @@
 # found in the LICENSE file.
 
 import argparse
+import datetime
 import httplib
 import logging
 import os
@@ -26,11 +27,13 @@ from autotest_lib.scheduler import scheduler_lib
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 from autotest_lib.server import utils as server_utils
 from chromite.lib import timeout_util
+from django.core.exceptions import MultipleObjectsReturned
 from django.db import transaction
 
 try:
     from chromite.lib import metrics
     from chromite.lib import ts_mon_config
+    from infra_libs import ts_mon
 except ImportError:
     metrics = server_utils.metrics_mock
     ts_mon_config = server_utils.metrics_mock
@@ -207,7 +210,11 @@ class ShardClient(object):
         if not incorrect_host_ids:
             return
 
-        models.Host.objects.filter(id__in=incorrect_host_ids).delete()
+        try:
+            models.Host.objects.filter(id__in=incorrect_host_ids).delete()
+        except MultipleObjectsReturned as e:
+            logging.exception('Failed to remove incorrect hosts %s',
+                              incorrect_host_ids)
 
 
     @property
@@ -275,8 +282,10 @@ class ShardClient(object):
         @returns: Tuple of three lists. The first one contains job ids, the
                   second one host ids, and the third one host statuses.
         """
-        job_ids = list(models.Job.objects.filter(
-                hostqueueentry__complete=False).values_list('id', flat=True))
+        jobs = models.Job.objects.filter(hostqueueentry__complete=False)
+        job_ids = list(jobs.values_list('id', flat=True))
+        self._report_job_time_distribution(jobs)
+
         host_models = models.Host.objects.filter(invalid=0)
         host_ids = []
         host_statuses = []
@@ -307,17 +316,33 @@ class ShardClient(object):
                 'known_job_ids': known_job_ids,
                 'known_host_ids': known_host_ids,
                 'known_host_statuses': known_host_statuses,
-                'jobs': jobs, 'hqes': hqes}
+                'jobs': jobs,
+                'hqes': hqes}
 
+
+    def _report_job_time_distribution(self, jobs):
+        """Report distribution of job durations to monarch."""
+        jobs_time_distribution = metrics.Distribution(
+                _METRICS_PREFIX + 'known_jobs_durations')
+        now = datetime.datetime.now()
+
+        # The type expected by the .set(...) of a distribution is a
+        # distribution.
+        dist = ts_mon.Distribution(ts_mon.GeometricBucketer())
+        for job in jobs:
+            duration = int(
+                    max(0, (now - job.created_on).total_seconds()))
+            dist.add(duration)
+        jobs_time_distribution.set(dist)
 
     def _report_packet_metrics(self, packet):
         """Report stats about outgoing packet to monarch."""
         metrics.Gauge(_METRICS_PREFIX + 'known_job_ids_count').set(
-            len(packet['known_job_ids']))
+                len(packet['known_job_ids']))
         metrics.Gauge(_METRICS_PREFIX + 'jobs_upload_count').set(
-            len(packet['jobs']))
+                len(packet['jobs']))
         metrics.Gauge(_METRICS_PREFIX + 'known_host_ids_count').set(
-            len(packet['known_host_ids']))
+                len(packet['known_host_ids']))
 
 
     def _heartbeat_failure(self, log_message, failure_type_str=''):

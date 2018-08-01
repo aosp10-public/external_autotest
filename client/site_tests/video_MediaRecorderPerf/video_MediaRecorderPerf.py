@@ -16,6 +16,7 @@ from autotest_lib.client.common_lib import error, file_utils
 from autotest_lib.client.common_lib import utils as common_utils
 from autotest_lib.client.common_lib.cros import chrome
 from autotest_lib.client.cros.video import constants
+from autotest_lib.client.cros.video import device_capability
 from autotest_lib.client.cros.video import helper_logger
 from autotest_lib.client.cros.video import histogram_verifier
 
@@ -158,7 +159,7 @@ class video_MediaRecorderPerf(test.test):
         return (elapsed_time / mkv_listener.get_num_frames(), cpu_usage)
 
     @helper_logger.video_log_wrapper
-    def run_once(self, codec, fps, video_file):
+    def run_once(self, codec, fps, video_file, capability):
         """ Report cpu usage and frame processing time with HW and SW encode.
 
         Use MediaRecorder to record a videos with HW encode and SW encode, and
@@ -169,7 +170,10 @@ class video_MediaRecorderPerf(test.test):
         @param fps: an integer specifying FPS of the fake input video stream.
         @param video_file: a string specifying the name of the video file to be
                 used as fake input video stream.
+        @param capability: The capability required for running this test.
         """
+        device_capability.DeviceCapability().ensure_capability(capability)
+
         # Download test video.
         url = DOWNLOAD_BASE + video_file
         local_path = os.path.join(self.bindir, video_file)
@@ -212,4 +216,3 @@ class video_MediaRecorderPerf(test.test):
                 processing_time_hw,
                 cpu_usage_hw)
         logging.info(log)
-

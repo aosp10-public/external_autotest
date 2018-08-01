@@ -33,7 +33,6 @@ NAME_ATHEROS_AR9280 = 'Atheros AR9280'
 NAME_ATHEROS_AR9382 = 'Atheros AR9382'
 NAME_ATHEROS_AR9462 = 'Atheros AR9462'
 NAME_QUALCOMM_ATHEROS_QCA6174 = 'Qualcomm Atheros QCA6174'
-NAME_QUALCOMM_ATHEROS_NFA344A = 'Qualcomm Atheros NFA344A/QCA6174'
 NAME_INTEL_7260 = 'Intel 7260'
 NAME_INTEL_7265 = 'Intel 7265'
 NAME_INTEL_9000 = 'Intel 9000'
@@ -55,7 +54,7 @@ DEVICE_NAME_LOOKUP = {
     DeviceInfo('0x168c', '0x0030'): NAME_ATHEROS_AR9382,
     DeviceInfo('0x168c', '0x0034'): NAME_ATHEROS_AR9462,
     DeviceInfo('0x168c', '0x003e'): NAME_QUALCOMM_ATHEROS_QCA6174,
-    DeviceInfo('0x105b', '0xe09d'): NAME_QUALCOMM_ATHEROS_NFA344A,
+    DeviceInfo('0x105b', '0xe09d'): NAME_QUALCOMM_ATHEROS_QCA6174,
     DeviceInfo('0x8086', '0x08b1'): NAME_INTEL_7260,
     DeviceInfo('0x8086', '0x08b2'): NAME_INTEL_7260,
     DeviceInfo('0x8086', '0x095a'): NAME_INTEL_7265,
@@ -167,6 +166,18 @@ class Interface:
 
 
     @property
+    def module_name(self):
+        """@return Name of kernel module in use by this interface."""
+        module_readlink_result = self._run('readlink "%s"' %
+                os.path.join(self.device_path, 'driver', 'module'),
+                ignore_status=True)
+        if module_readlink_result.exit_status != 0:
+            return None
+
+        return os.path.basename(module_readlink_result.stdout.strip())
+
+
+    @property
     def device_description(self):
         """@return DeviceDescription object for a WiFi interface, or None."""
         read_file = (lambda path: self._run('cat "%s"' % path).stdout.rstrip()
@@ -194,12 +205,8 @@ class Interface:
             logging.error('Device vendor/product pair %r for device %s is '
                           'unknown!', driver_info, product_id)
             device_name = NAME_UNKNOWN
-        module_readlink_result = self._run('readlink "%s"' %
-                os.path.join(device_path, 'driver', 'module'),
-                ignore_status=True)
-        if module_readlink_result.exit_status == 0:
-            module_name = os.path.basename(
-                    module_readlink_result.stdout.strip())
+        module_name = self.module_name
+        if module_name is not None:
             kernel_release = self._run('uname -r').stdout.strip()
             module_path = self._run('find '
                                     '/lib/modules/%s/kernel/drivers/net '

@@ -6,10 +6,10 @@ import logging
 
 from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib.cros import tpm_utils
-from autotest_lib.server.cros.faft.firmware_test import FirmwareTest
+from autotest_lib.server.cros.faft.cr50_test import Cr50Test
 
 
-class firmware_Cr50Unlock(FirmwareTest):
+class firmware_Cr50Unlock(Cr50Test):
     """Verify cr50 unlock using the console and gsctool.
 
     Enable the lock on cr50, run the different forms of unlock, making sure
@@ -19,13 +19,11 @@ class firmware_Cr50Unlock(FirmwareTest):
     """
     version = 1
 
-    def initialize(self, host, cmdline_args):
+    def initialize(self, host, cmdline_args, full_args):
         """Initialize servo and check that it has access to cr50 with ccd"""
-        super(firmware_Cr50Unlock, self).initialize(host, cmdline_args)
+        super(firmware_Cr50Unlock, self).initialize(host, cmdline_args,
+                full_args)
 
-        if not hasattr(self, 'cr50'):
-            raise error.TestNAError('Test can only be run on devices with '
-                                    'access to the Cr50 console')
         if self.cr50.using_ccd():
             raise error.TestNAError('Use a flex cable instead of CCD cable.')
 
@@ -38,7 +36,7 @@ class firmware_Cr50Unlock(FirmwareTest):
                 ignore_status=not unlock_allowed)
         if not unlock_allowed and (result.exit_status != 3 or
             'Error: rv 7, response 7' not in result.stderr):
-            raise error.TestFail('unexpected lockout result %r', result)
+            raise error.TestFail('unexpected lockout result %r' % result)
         self.check_unlock(unlock_allowed)
 
 
@@ -79,7 +77,7 @@ class firmware_Cr50Unlock(FirmwareTest):
         self.cr50.set_ccd_level('lock')
 
         # Clear the TPM owner. The login state can affect unlock abilities
-        tpm_utils.ClearTPMOwnerRequest(self.host)
+        tpm_utils.ClearTPMOwnerRequest(self.host, wait_for_ready=True)
 
         unlock_func(unlock_allowed)
 
@@ -87,15 +85,15 @@ class firmware_Cr50Unlock(FirmwareTest):
         # no matter how it is being set.
 
 
-    def run_once(self, ccd_lockout):
+    def run_once(self):
         """Verify cr50 lock behavior on v1 images and v0 images"""
         logging.info('ccd should %sbe locked out',
-                '' if ccd_lockout else 'not ')
+                '' if self.ccd_lockout else 'not ')
         if self.cr50.has_command('ccdstate'):
-            self.unlock_test(self.gsctool_unlock, not ccd_lockout)
+            self.unlock_test(self.gsctool_unlock, not self.ccd_lockout)
             self.unlock_test(self.console_unlock, False)
-            logging.info('ccd unlock is %s', 'locked out' if ccd_lockout else
-                    'accessible')
+            logging.info('ccd unlock is %s', 'locked out' if self.ccd_lockout
+                    else 'accessible')
         else:
             # pre-v1, cr50 cannot be unlocked. Make sure that's true
             logging.info(self.cr50.send_command_get_output('lock disable',

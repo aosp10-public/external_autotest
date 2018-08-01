@@ -74,8 +74,8 @@ from autotest_lib.server import hosts
 from autotest_lib.server.cros.dynamic_suite.constants import VERSION_PREFIX
 from autotest_lib.server.hosts import afe_store
 from autotest_lib.server.hosts import servo_host
-from autotest_lib.site_utils.deployment import commandline
-from autotest_lib.site_utils.stable_images import assign_stable_images
+from autotest_lib.site_utils.deployment import cmdvalidate
+from autotest_lib.site_utils.stable_images import build_data
 
 
 _LOG_FORMAT = '%(asctime)s | %(levelname)-10s | %(message)s'
@@ -123,7 +123,7 @@ class _MultiFileWriter(object):
 def _get_upload_log_path(arguments):
     return 'gs://{bucket}/{name}'.format(
         bucket=_LOG_BUCKET_NAME,
-        name=commandline.get_default_logdir_name(arguments))
+        name=arguments.upload_basename)
 
 
 def _upload_logs(dirpath, gspath):
@@ -220,12 +220,12 @@ def _update_build(afe, report_log, arguments):
                              % (arguments.build, cros_version))
 
     afe_fw_versions = {arguments.board: afe_fw}
-    fw_versions = assign_stable_images.get_firmware_versions(
-        cros_version_map, arguments.board, cros_version)
+    fw_versions = build_data.get_firmware_versions(
+        arguments.board, cros_version)
     # At this point `cros_version` is our new repair build, and
     # `fw_version` is our new target firmware.  Call the AFE back with
     # updates as necessary.
-    if not arguments.nostable:
+    if not arguments.dry_run:
         if cros_version != afe_cros:
             cros_version_map.set_version(arguments.board, cros_version)
 
@@ -438,19 +438,27 @@ def _install_test_image(host, arguments):
     # since we can't pass None through the xml rpcs, use 0 to indicate None.
     if not host.servo.probe_host_usb_dev(timeout=0):
         raise Exception('No USB stick detected on Servo host')
-    try:
-        if not arguments.noinstall:
-            if not arguments.nostage:
-                host.servo.image_to_servo_usb(
-                        host.stage_image_for_servo())
-            if arguments.full_deploy:
-                _install_firmware(host)
+    if arguments.dry_run:
+        return
+    if arguments.stageusb:
+        try:
+            host.servo.image_to_servo_usb(
+                    host.stage_image_for_servo())
+        except Exception as e:
+            logging.exception('Failed to stage image on USB: %s', e)
+            raise Exception('USB staging failed')
+    if arguments.install_firmware:
+        try:
+            _install_firmware(host)
+        except error.AutoservRunError as e:
+            logging.exception('Firmware update failed: %s', e)
+            raise Exception('chromeos-firmwareupdate failed')
+    if arguments.install_test_image:
+        try:
             host.servo_install()
-    except error.AutoservRunError as e:
-        logging.exception('Failed to install: %s', e)
-        raise Exception('chromeos-install failed')
-    finally:
-        host.close()
+        except error.AutoservRunError as e:
+            logging.exception('Failed to install: %s', e)
+            raise Exception('chromeos-install failed')
 
 
 def _install_and_update_afe(afe, hostname, host_attrs, arguments):
@@ -472,26 +480,31 @@ def _install_and_update_afe(afe, hostname, host_attrs, arguments):
     """
     afe_host, unlock_on_failure = _get_afe_host(afe, hostname, host_attrs,
                                                 arguments)
+    host = None
     try:
         host = _create_host(hostname, afe, afe_host)
         _install_test_image(host, arguments)
-        host.labels.update_labels(host)
-        platform_labels = afe.get_labels(
-                host__hostname=hostname, platform=True)
-        if not platform_labels:
-            platform = host.get_platform()
-            new_labels = afe.get_labels(name=platform)
-            if not new_labels:
-                afe.create_label(platform, platform=True)
-            afe_host.add_labels([platform])
+        if arguments.install_test_image and not arguments.dry_run:
+            host.labels.update_labels(host)
+            platform_labels = afe.get_labels(
+                    host__hostname=hostname, platform=True)
+            if not platform_labels:
+                platform = host.get_platform()
+                new_labels = afe.get_labels(name=platform)
+                if not new_labels:
+                    afe.create_label(platform, platform=True)
+                afe_host.add_labels([platform])
         version = [label for label in afe_host.labels
                        if label.startswith(VERSION_PREFIX)]
-        if version:
+        if version and not arguments.dry_run:
             afe_host.remove_labels(version)
     except Exception as e:
         if unlock_on_failure and not _try_unlock_host(afe_host):
             logging.error('Failed to unlock host!')
         raise
+    finally:
+        if host is not None:
+            host.close()
 
     if not _try_unlock_host(afe_host):
         raise Exception('Install succeeded, but failed to unlock the DUT.')
@@ -579,7 +592,7 @@ def _report_results(afe, report_log, hostnames, results):
         else:
             failure_reports.append(_ReportResult(hostname, result))
     if successful_hosts:
-        afe.reverify_hosts(hostnames=successful_hosts)
+        afe.repair_hosts(hostnames=successful_hosts)
         for h in afe.get_hosts(hostnames=successful_hosts):
             for label in h.labels:
                 if label.startswith(constants.Labels.POOL_PREFIX):
@@ -739,7 +752,7 @@ def _get_host_attributes(host_info_list, afe):
     return host_attributes
 
 
-def install_duts(argv, full_deploy):
+def install_duts(arguments):
     """Install a test image on DUTs, and deploy them.
 
     This handles command line parsing for both the repair and
@@ -748,25 +761,20 @@ def install_duts(argv, full_deploy):
     dev-signed firmware on the DUT prior to installing the test
     image.
 
-    @param argv         Command line arguments to be parsed.
-    @param full_deploy  If true, do the full deployment that includes
-                        flashing dev-signed RO firmware onto the DUT.
+    @param arguments    Command line arguments with options, as
+                        returned by `argparse.Argparser`.
     """
+    arguments = cmdvalidate.validate_arguments(arguments)
+    if arguments is None:
+        sys.exit(1)
+    sys.stderr.write('Installation output logs in %s\n' % arguments.logdir)
+
     # Override tempfile.tempdir.  Some of the autotest code we call
     # will create temporary files that don't get cleaned up.  So, we
     # put the temp files in our results directory, so that we can
-    # clean up everything in one fell swoop.
+    # clean up everything at one fell swoop.
     tempfile.tempdir = tempfile.mkdtemp()
-    # MALCOLM:
-    #   Be comforted.
-    #   Let's make us med'cines of our great revenge,
-    #   To cure this deadly grief.
     atexit.register(shutil.rmtree, tempfile.tempdir)
-
-    arguments = commandline.parse_command(argv, full_deploy)
-    if not arguments:
-        sys.exit(1)
-    sys.stderr.write('Installation output logs in %s\n' % arguments.logdir)
 
     # We don't want to distract the user with logging output, so we catch
     # logging output in a file.
@@ -778,6 +786,9 @@ def install_duts(argv, full_deploy):
     with open(report_log_path, 'w') as report_log_file:
         report_log = _MultiFileWriter([report_log_file, sys.stdout])
         afe = frontend.AFE(server=arguments.web)
+        if arguments.dry_run:
+            report_log.write('Dry run - installation and most testing '
+                             'will be skipped.\n')
         current_build = _update_build(afe, report_log, arguments)
         host_attr_dict = _get_host_attributes(arguments.host_info_list, afe)
         install_pool = multiprocessing.Pool(len(arguments.hostnames))
@@ -786,16 +797,16 @@ def install_duts(argv, full_deploy):
         results_list = install_pool.map(install_function, arguments.hostnames)
         _report_results(afe, report_log, arguments.hostnames, results_list)
 
-        gspath = _get_upload_log_path(arguments)
-        report_log.write('Logs will be uploaded to %s\n' % (gspath,))
-
-    try:
-        _upload_logs(arguments.logdir, gspath)
-    except Exception as e:
-        upload_failure_log_path = os.path.join(arguments.logdir,
-                                               'gs_upload_failure.log')
-        with open(upload_failure_log_path, 'w') as file:
-            traceback.print_exc(limit=None, file=file)
-        sys.stderr.write('Failed to upload logs;'
-                         ' failure details are stored in {}.\n'
-                         .format(upload_failure_log_path))
+    if arguments.upload:
+        try:
+            gspath = _get_upload_log_path(arguments)
+            sys.stderr.write('Logs will be uploaded to %s\n' % (gspath,))
+            _upload_logs(arguments.logdir, gspath)
+        except Exception as e:
+            upload_failure_log_path = os.path.join(arguments.logdir,
+                                                   'gs_upload_failure.log')
+            with open(upload_failure_log_path, 'w') as file:
+                traceback.print_exc(limit=None, file=file)
+            sys.stderr.write('Failed to upload logs;'
+                             ' failure details are stored in {}.\n'
+                             .format(upload_failure_log_path))

@@ -61,13 +61,19 @@ class CFMFacadeNative(object):
         time.sleep(self._ENROLLMENT_DELAY)
 
 
-    def restart_chrome_for_cfm(self):
-        """Restart chrome with custom values for CFM."""
+    def restart_chrome_for_cfm(self, extra_chrome_args=None):
+        """Restart chrome with custom values for CFM.
+
+        @param extra_chrome_args a list with extra command line arguments for
+                Chrome.
+        """
         custom_chrome_setup = {"clear_enterprise_policy": False,
                                "dont_override_profile": True,
                                "disable_gaia_services": False,
                                "disable_default_apps": False,
                                "auto_login": False}
+        if extra_chrome_args:
+            custom_chrome_setup["extra_browser_args"] = extra_chrome_args
         self._resource.start_custom_chrome(custom_chrome_setup)
 
 
@@ -126,11 +132,17 @@ class CFMFacadeNative(object):
         @return The path to the lastest packaged app log file, if any.
         """
         try:
-            return max(glob.iglob(self._PA_LOGS_PATTERN), key=os.path.getctime)
+            return max(self.get_all_pa_logs_file_path(), key=os.path.getctime)
         except ValueError as e:
             logging.exception('Error while searching for packaged app logs.')
             return None
 
+
+    def get_all_pa_logs_file_path(self):
+        """
+        @return The paths to the all packaged app log files, if any.
+        """
+        return glob.iglob(self._PA_LOGS_PATTERN)
 
     def reboot_device_with_chrome_api(self):
         """Reboot device using chrome runtime API."""
@@ -515,18 +527,23 @@ class CFMFacadeNative(object):
                     'Is the ExportMediaInfo mod active? '
                     'The mod is only available for Meet.')
 
+        # Sanitize the timestamp on the JS side to work around crbug.com/851482.
+        # Use JSON stringify/parse to create a deep copy of the data point.
+        get_data_points_js_script = """
+            var dataPoints = window.realtime.media.getMediaInfoDataPoints();
+            dataPoints.map((point) => {
+                var sanitizedPoint = JSON.parse(JSON.stringify(point));
+                sanitizedPoint["timestamp"] /= 1000.0;
+                return sanitizedPoint;
+            });"""
+
         data_points = self._webview_context.EvaluateJavaScript(
-                'window.realtime.media.getMediaInfoDataPoints()')
+            get_data_points_js_script)
+        # XML RCP gives overflow errors when trying to send too large
+        # integers or longs so we convert media stats to floats.
         for data_point in data_points:
-            # XML RCP gives overflow errors when trying to send too large
-            # integers or longs. Convert timestamps to float seconds and media
-            # stats to floats. We do not care if we lose some precision.
-            # When we are at it, convert the timestamp to seconds as
-            # expected in Python.
-            data_point['timestamp'] = data_point['timestamp'] / 1000.0
             for media in data_point['media']:
                 for k, v in media.iteritems():
                     if type(v) == int:
                         media[k] = float(v)
         return data_points
-

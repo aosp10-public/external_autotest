@@ -21,15 +21,16 @@ This file generates all telemetry_Benchmarks control files from a master list.
 # haddowk in the change.
 
 PERF_PER_BUILD_TESTS = (
+    'cros_ui_smoothness',
     'jetstream',
     'kraken',
     'octane',
-    'smoothness.top_25_smooth',
     'speedometer',
+    'speedometer2',
 )
 
 PERF_DAILY_RUN_TESTS = (
-    'cros_ui_smoothness',
+    'cros_tab_switching.typical_24',
     'dromaeo.domcoreattr',
     'dromaeo.domcoremodify',
     'dromaeo.domcorequery',
@@ -38,12 +39,7 @@ PERF_DAILY_RUN_TESTS = (
     'memory.desktop',
     'page_cycler_v2.typical_25',
     'robohornet_pro',
-    'smoothness.tough_animation_cases',
-    'smoothness.tough_canvas_cases',
-    'smoothness.tough_filters_cases',
     'smoothness.tough_pinch_zoom_cases',
-    'smoothness.tough_scrolling_cases',
-    'smoothness.tough_webgl_cases',
     'sunspider',
     'webrtc',
 )

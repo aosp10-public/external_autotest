@@ -49,9 +49,14 @@ class CFMFacadeRemoteAdapter(object):
         self._cfm_proxy.enroll_device()
 
 
-    def restart_chrome_for_cfm(self):
-        """Restart chrome for CFM."""
-        self._cfm_proxy.restart_chrome_for_cfm()
+    def restart_chrome_for_cfm(self, extra_chrome_args=None):
+        """
+        Restart chrome for CFM.
+
+        @param extra_chrome_args a list with extra command line arguments for
+                Chrome.
+        """
+        self._cfm_proxy.restart_chrome_for_cfm(extra_chrome_args)
 
     def reboot_device_with_chrome_api(self):
         """Reboot device using Chrome runtime API."""
@@ -145,6 +150,13 @@ class CFMFacadeRemoteAdapter(object):
         @return The path to the lastest packaged app log file, if any.
         """
         return self._cfm_proxy.get_latest_pa_logs_file_path()
+
+
+    def get_all_pa_logs_file_path(self):
+        """
+        @return The path to all packaged app log files, if any.
+        """
+        return self._cfm_proxy.get_all_pa_logs_file_path()
 
 
     def is_in_hangout_session(self):

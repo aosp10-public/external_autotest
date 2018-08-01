@@ -7,11 +7,14 @@ import fnmatch
 import hashlib
 import logging
 import os
+import subprocess
 
 from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error
 from autotest_lib.client.common_lib import file_utils
 from autotest_lib.client.cros import chrome_binary_test
+from autotest_lib.client.cros.video import device_capability
+from autotest_lib.client.cros.video import encoder_utils
 from autotest_lib.client.cros.video import helper_logger
 
 DOWNLOAD_BASE = 'http://commondatastorage.googleapis.com/chromiumos-test-assets-public/'
@@ -35,6 +38,19 @@ def _download_video(download_path, local_file):
         md5sum = hashlib.md5(r.read()).hexdigest()
         if md5sum not in download_path:
             raise error.TestError('unmatched md5 sum: %s' % md5sum)
+
+def _run_on_intel_cpu():
+    try:
+        lscpu_result = subprocess.check_output(['lscpu'])
+    except subprocess.CalledProcessError:
+        logging.warning('lscpu failed.')
+        return False
+    for cpu_info in lscpu_result.splitlines():
+        key, _, value = cpu_info.partition(':')
+        if key == 'Model name':
+            return value.strip().startswith('Intel(R)')
+    logging.warning("%s", lscpu_result)
+    return False
 
 
 class video_VideoEncodeAccelerator(chrome_binary_test.ChromeBinaryTest):
@@ -95,6 +111,12 @@ class video_VideoEncodeAccelerator(chrome_binary_test.ChromeBinaryTest):
 
         board = utils.get_current_board()
 
+        # Disable 320x180 test case. Bitrate of vp8 encoder on the test case is
+        # out of expected range. b/110059922
+        # TODO(hiroh): Remove this once b/110059922 is fixed.
+        if _run_on_intel_cpu():
+            blacklist[(board, VP8, (320, 180))] = ['*']
+
         filter_list = []
         for (board_key, profile_key, size_key), value in blacklist.items():
             if (fnmatch.fnmatch(board, board_key) and
@@ -109,7 +131,8 @@ class video_VideoEncodeAccelerator(chrome_binary_test.ChromeBinaryTest):
 
     @helper_logger.video_log_wrapper
     @chrome_binary_test.nuke_chrome
-    def run_once(self, in_cloud, streams, profile, gtest_filter=None):
+    def run_once(self, in_cloud, streams, profile, capability,
+                 gtest_filter=None):
         """Runs video_encode_accelerator_unittest on the streams.
 
         @param in_cloud: Input file needs to be downloaded first.
@@ -119,6 +142,7 @@ class video_VideoEncodeAccelerator(chrome_binary_test.ChromeBinaryTest):
 
         @raises error.TestFail for video_encode_accelerator_unittest failures.
         """
+        device_capability.DeviceCapability().ensure_capability(capability)
 
         last_test_failure = None
         for path, width, height, bit_rate in streams:
@@ -136,6 +160,8 @@ class video_VideoEncodeAccelerator(chrome_binary_test.ChromeBinaryTest):
                     input_path, width, height, profile, output_path, bit_rate))
             cmd_line_list.append(helper_logger.chrome_vmodule_flag())
             cmd_line_list.append('--ozone-platform=gbm')
+            if encoder_utils.has_broken_flush():
+                cmd_line_list.append('--disable_flush')
 
             # Command line |gtest_filter| can override get_filter_option().
             predefined_filter = self.get_filter_option(profile, (width, height))

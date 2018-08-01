@@ -40,8 +40,8 @@ class network_WiFi_UpdateRouter(test.test):
         'panther': StableVersion('trybot-panther-test-ap/R47-7424.0.0-b10',
                                  '7424.0.2015_09_03_1532'),
         'whirlwind': StableVersion('trybot-whirlwind-test-ap-tryjob/'
-                                   'R65-10323.33.0-c40061',
-                                   '10323.33.2018_02_15_1605')
+                                   'R65-10323.83.0-c40829',
+                                   '10323.83.2018_04_30_1605')
     }
 
 
@@ -54,7 +54,6 @@ class network_WiFi_UpdateRouter(test.test):
 
     def get_update_url(self, ds_url, image):
         CONFIG = global_config.global_config
-        # pylint: disable-msg=E1120
         IMAGE_URL_PATTERN = CONFIG.get_config_value(
                 'CROS', 'image_url_pattern', type=str)
         return IMAGE_URL_PATTERN % (ds_url, image)
@@ -118,7 +117,7 @@ class network_WiFi_UpdateRouter(test.test):
 
         url = self.get_update_url(ds.url(), desired.builder_version)
         try:
-            router_host.machine_install(force_update=True, update_url=url)
+            router_host.machine_install(update_url=url)
         except error.InstallError as e:
             logging.error(e)
             raise error.TestFail(str(e))

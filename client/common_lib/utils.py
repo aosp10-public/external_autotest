@@ -12,12 +12,15 @@ inheritance with, just a collection of static methods.
 # pylint: disable=missing-docstring
 
 import StringIO
+import collections
+import datetime
 import errno
 import inspect
 import itertools
 import logging
 import os
 import pickle
+import Queue
 import random
 import re
 import resource
@@ -28,7 +31,9 @@ import socket
 import string
 import struct
 import subprocess
+import sys
 import textwrap
+import threading
 import time
 import urllib2
 import urlparse
@@ -571,7 +576,7 @@ def urlretrieve(url, filename, data=None, timeout=300):
         src_file.close()
 
 
-def hash(type, input=None):
+def hash(hashtype, input=None):
     """
     Returns an hash object of type md5 or sha1. This function is implemented in
     order to encapsulate hash objects in a way that is compatible with python
@@ -584,15 +589,15 @@ def hash(type, input=None):
 
     @param input: Optional input string that will be used to update the hash.
     """
-    if type not in ['md5', 'sha1']:
-        raise ValueError("Unsupported hash type: %s" % type)
+    if hashtype not in ['md5', 'sha1']:
+        raise ValueError("Unsupported hash type: %s" % hashtype)
 
     try:
-        hash = hashlib.new(type)
+        hash = hashlib.new(hashtype)
     except NameError:
-        if type == 'md5':
+        if hashtype == 'md5':
             hash = md5.new()
-        elif type == 'sha1':
+        elif hashtype == 'sha1':
             hash = sha.new()
 
     if input:
@@ -683,7 +688,7 @@ def run(command, timeout=None, ignore_status=False, stdout_tee=None,
             code of the command is.
     @param stdout_tee: optional file-like object to which stdout data
             will be written as it is generated (data will still be stored
-            in result.stdout).
+            in result.stdout unless this is DEVNULL).
     @param stderr_tee: likewise for stderr.
     @param verbose: if True, log the command being run.
     @param stdin: stdin to pass to the executed process (can be a file
@@ -971,6 +976,31 @@ def signal_pid(pid, sig):
     return False
 
 
+def before_force_close(func):
+    """
+    Runs a function before the process is forced close by a catchable signal.
+
+    Allows for the process to cleanup before closing due to a ctrl-c, for
+    example. Note that this does not cause func to be called if the process is
+    closed normally. Something like atexit would be more appropriate in such a
+    situation.
+
+    @param func function taking no arguments to be called prior to being killed
+    """
+    def sig_handler(signum, frame):
+        logging.info('Catching signal: %d' % signum)
+        func()
+
+    catch_signals = [signal.SIGINT]
+    if sys.platform == 'win32':
+        catch_signals.extend([signal.CTRL_C_EVENT,
+                              signal.CTRL_BREAK_EVENT,
+                              signal.SIGBREAK])
+    else:
+        catch_signals.append(signal.SIGTERM)
+    map(lambda x: signal.signal(x, sig_handler), catch_signals)
+
+
 def nuke_subprocess(subproc):
     # check if the subprocess is still alive, first
     if subproc.poll() is not None:
@@ -1136,6 +1166,7 @@ def get_arch_userspace(run_function=run):
     """
     archs = {
         'arm': 'ELF 32-bit.*, ARM,',
+        'arm64': 'ELF 64-bit.*, ARM aarch64,',
         'i386': 'ELF 32-bit.*, Intel 80386,',
         'x86_64': 'ELF 64-bit.*, x86-64,',
     }
@@ -1167,6 +1198,71 @@ def get_num_logical_cpus_per_socket(run_function=run):
         raise error.TestError('Number of siblings differ %r' %
                               num_siblings)
     return num_siblings[0]
+
+
+def set_high_performance_mode(host=None):
+    """
+    Sets the kernel governor mode to the highest setting.
+    Returns previous governor state.
+    """
+    original_governors = get_scaling_governor_states(host)
+    set_scaling_governors('performance', host)
+    return original_governors
+
+
+def set_scaling_governors(value, host=None):
+    """
+    Sets all scaling governor to string value.
+    Sample values: 'performance', 'interactive', 'ondemand', 'powersave'.
+    """
+    paths = _get_cpufreq_paths('scaling_governor', host)
+    if not paths:
+        logging.info("Could not set governor states, as no files of the form "
+                     "'/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor' "
+                     "were found.")
+    run_func = host.run if host else system
+    for path in paths:
+        cmd = 'echo %s > %s' % (value, path)
+        logging.info('Writing scaling governor mode \'%s\' -> %s', value, path)
+        # On Tegra CPUs can be dynamically enabled/disabled. Ignore failures.
+        run_func(cmd, ignore_status=True)
+
+
+def _get_cpufreq_paths(filename, host=None):
+    """
+    Returns a list of paths to the governors.
+    """
+    run_func = host.run if host else run
+    cmd = 'ls /sys/devices/system/cpu/cpu*/cpufreq/' + filename
+    try:
+        paths = run_func(cmd, verbose=False).stdout.splitlines()
+    except error.CmdError:
+        return []
+    return paths
+
+
+def get_scaling_governor_states(host=None):
+    """
+    Returns a list of (performance governor path, current state) tuples.
+    """
+    paths = _get_cpufreq_paths('scaling_governor', host)
+    path_value_list = []
+    run_func = host.run if host else run
+    for path in paths:
+        value = run_func('head -n 1 %s' % path, verbose=False).stdout
+        path_value_list.append((path, value))
+    return path_value_list
+
+
+def restore_scaling_governor_states(path_value_list, host=None):
+    """
+    Restores governor states. Inverse operation to get_scaling_governor_states.
+    """
+    run_func = host.run if host else system
+    for (path, value) in path_value_list:
+        cmd = 'echo %s > %s' % (value.rstrip('\n'), path)
+        # On Tegra CPUs can be dynamically enabled/disabled. Ignore failures.
+        run_func(cmd, ignore_status=True)
 
 
 def merge_trees(src, dest):
@@ -2239,117 +2335,6 @@ def has_systemd():
     return os.path.basename(os.readlink('/proc/1/exe')) == 'systemd'
 
 
-def version_match(build_version, release_version, update_url=''):
-    """Compare release version from lsb-release with cros-version label.
-
-    build_version is a string based on build name. It is prefixed with builder
-    info and branch ID, e.g., lumpy-release/R43-6809.0.0. It may not include
-    builder info, e.g., lumpy-release, in which case, update_url shall be passed
-    in to determine if the build is a trybot or pgo-generate build.
-    release_version is retrieved from lsb-release.
-    These two values might not match exactly.
-
-    The method is designed to compare version for following 6 scenarios with
-    samples of build version and expected release version:
-    1. trybot non-release build (paladin, pre-cq or test-ap build).
-    build version:   trybot-lumpy-paladin/R27-3837.0.0-b123
-    release version: 3837.0.2013_03_21_1340
-
-    2. trybot release build.
-    build version:   trybot-lumpy-release/R27-3837.0.0-b456
-    release version: 3837.0.0
-
-    3. buildbot official release build.
-    build version:   lumpy-release/R27-3837.0.0
-    release version: 3837.0.0
-
-    4. non-official paladin rc build.
-    build version:   lumpy-paladin/R27-3878.0.0-rc7
-    release version: 3837.0.0-rc7
-
-    5. chrome-perf build.
-    build version:   lumpy-chrome-perf/R28-3837.0.0-b2996
-    release version: 3837.0.0
-
-    6. pgo-generate build.
-    build version:   lumpy-release-pgo-generate/R28-3837.0.0-b2996
-    release version: 3837.0.0-pgo-generate
-
-    7. build version with --cheetsth suffix.
-    build version:   lumpy-release/R28-3837.0.0-cheetsth
-    release version: 3837.0.0
-
-    TODO: This logic has a bug if a trybot paladin build failed to be
-    installed in a DUT running an older trybot paladin build with same
-    platform number, but different build number (-b###). So to conclusively
-    determine if a tryjob paladin build is imaged successfully, we may need
-    to find out the date string from update url.
-
-    @param build_version: Build name for cros version, e.g.
-                          peppy-release/R43-6809.0.0 or R43-6809.0.0
-    @param release_version: Release version retrieved from lsb-release,
-                            e.g., 6809.0.0
-    @param update_url: Update url which include the full builder information.
-                       Default is set to empty string.
-
-    @return: True if the values match, otherwise returns False.
-    """
-    # If the build is from release, CQ or PFQ builder, cros-version label must
-    # be ended with release version in lsb-release.
-    if (build_version.endswith(release_version) or
-            build_version.endswith(release_version + '-cheetsth')):
-        return True
-
-    if build_version.endswith('-cheetsth'):
-        build_version = re.sub('-cheetsth' + '$', '', build_version)
-
-    # Remove R#- and -b# at the end of build version
-    stripped_version = re.sub(r'(R\d+-|-b\d+)', '', build_version)
-    # Trim the builder info, e.g., trybot-lumpy-paladin/
-    stripped_version = stripped_version.split('/')[-1]
-
-    is_trybot_non_release_build = (
-            re.match(r'.*trybot-.+-(paladin|pre-cq|test-ap|toolchain)',
-                     build_version) or
-            re.match(r'.*trybot-.+-(paladin|pre-cq|test-ap|toolchain)',
-                     update_url))
-
-    # Replace date string with 0 in release_version
-    release_version_no_date = re.sub(r'\d{4}_\d{2}_\d{2}_\d+', '0',
-                                    release_version)
-    has_date_string = release_version != release_version_no_date
-
-    is_pgo_generate_build = (
-            re.match(r'.+-pgo-generate', build_version) or
-            re.match(r'.+-pgo-generate', update_url))
-
-    # Remove |-pgo-generate| in release_version
-    release_version_no_pgo = release_version.replace('-pgo-generate', '')
-    has_pgo_generate = release_version != release_version_no_pgo
-
-    if is_trybot_non_release_build:
-        if not has_date_string:
-            logging.error('A trybot paladin or pre-cq build is expected. '
-                          'Version "%s" is not a paladin or pre-cq  build.',
-                          release_version)
-            return False
-        return stripped_version == release_version_no_date
-    elif is_pgo_generate_build:
-        if not has_pgo_generate:
-            logging.error('A pgo-generate build is expected. Version '
-                          '"%s" is not a pgo-generate build.',
-                          release_version)
-            return False
-        return stripped_version == release_version_no_pgo
-    else:
-        if has_date_string:
-            logging.error('Unexpected date found in a non trybot paladin or '
-                          'pre-cq build.')
-            return False
-        # Versioned build, i.e., rc or release build.
-        return stripped_version == release_version
-
-
 def get_real_user():
     """Get the real user that runs the script.
 
@@ -2706,16 +2691,17 @@ def poll_for_condition(condition,
                        timeout=10,
                        sleep_interval=0.1,
                        desc=None):
-    """Polls until a condition becomes true.
+    """Polls until a condition is evaluated to true.
 
-    @param condition: function taking no args and returning bool
-    @param exception: exception to throw if condition doesn't become true
+    @param condition: function taking no args and returning anything that will
+                      evaluate to True in a conditional check
+    @param exception: exception to throw if condition doesn't evaluate to true
     @param timeout: maximum number of seconds to wait
     @param sleep_interval: time to sleep between polls
     @param desc: description of default TimeoutError used if 'exception' is
                  None
 
-    @return The true value that caused the poll loop to terminate.
+    @return The evaluated value that caused the poll loop to terminate.
 
     @raise 'exception' arg if supplied; TimeoutError otherwise
     """
@@ -2740,6 +2726,138 @@ def poll_for_condition(condition,
         time.sleep(sleep_interval)
 
 
+def threaded_return(function):
+    """
+    Decorator to add to a function to get that function to return a thread
+    object, but with the added benefit of storing its return value.
+
+    @param function: function object to be run in the thread
+
+    @return a threading.Thread object, that has already been started, is
+            recording its result, and can be completed and its result
+            fetched by calling .finish()
+    """
+    def wrapped_t(queue, *args, **kwargs):
+        """
+        Calls the decorated function as normal, but appends the output into
+        the passed-in threadsafe queue.
+        """
+        ret = function(*args, **kwargs)
+        queue.put(ret)
+
+    def wrapped_finish(threaded_object):
+        """
+        Provides a utility to this thread object, getting its result while
+        simultaneously joining the thread.
+        """
+        ret = threaded_object.get()
+        threaded_object.join()
+        return ret
+
+    def wrapper(*args, **kwargs):
+        """
+        Creates the queue and starts the thread, then assigns extra attributes
+        to the thread to give it result-storing capability.
+        """
+        q = Queue.Queue()
+        t = threading.Thread(target=wrapped_t, args=(q,) + args, kwargs=kwargs)
+        t.start()
+        t.result_queue = q
+        t.get = t.result_queue.get
+        t.finish = lambda: wrapped_finish(t)
+        return t
+
+    # for the decorator
+    return wrapper
+
+
+@threaded_return
+def background_sample_until_condition(
+        function,
+        condition=lambda: True,
+        timeout=10,
+        sleep_interval=1):
+    """
+    Records the value of the function until the condition is False or the
+    timeout is reached. Runs as a background thread, so it's nonblocking.
+    Usage might look something like:
+
+    def function():
+        return get_value()
+    def condition():
+        return self._keep_sampling
+
+    # main thread
+    sample_thread = utils.background_sample_until_condition(
+        function=function,condition=condition)
+    # do other work
+    # ...
+    self._keep_sampling = False
+    # blocking call to get result and join the thread
+    result = sample_thread.finish()
+
+    @param function: function object, 0 args, to be continually polled
+    @param condition: function object, 0 args, to say when to stop polling
+    @param timeout: maximum number of seconds to wait
+    @param number of seconds to wait in between polls
+
+    @return a thread object that has already been started and is running in
+            the background, whose run must be stopped with .finish(), which
+            also returns a list of the results from the sample function
+    """
+    log = []
+
+    end_time = datetime.datetime.now() + datetime.timedelta(
+            seconds = timeout + sleep_interval)
+
+    while condition() and datetime.datetime.now() < end_time:
+        log.append(function())
+        time.sleep(sleep_interval)
+    return log
+
+
 class metrics_mock(metrics_mock_class.mock_class_base):
     """mock class for metrics in case chromite is not installed."""
     pass
+
+
+MountInfo = collections.namedtuple('MountInfo', ['root', 'mount_point', 'tags'])
+
+
+def get_mount_info(process='self', mount_point=None):
+    """Retrieves information about currently mounted file systems.
+
+    @param mount_point: (optional) The mount point (a path).  If this is
+                        provided, only information about the given mount point
+                        is returned.  If this is omitted, info about all mount
+                        points is returned.
+    @param process: (optional) The process id (or the string 'self') of the
+                    process whose mountinfo will be obtained.  If this is
+                    omitted, info about the current process is returned.
+
+    @return A generator yielding one MountInfo object for each relevant mount
+            found in /proc/PID/mountinfo.
+    """
+    with open('/proc/{}/mountinfo'.format(process)) as f:
+        for line in f.readlines():
+            # These lines are formatted according to the proc(5) manpage.
+            # Sample line:
+            # 36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root \
+            #     rw,errors=continue
+            # Fields (descriptions omitted for fields we don't care about)
+            # 3: the root of the mount.
+            # 4: the mount point.
+            # 5: mount options.
+            # 6: tags.  There can be more than one of these.  This is where
+            #    shared mounts are indicated.
+            # 7: a dash separator marking the end of the tags.
+            mountinfo = line.split()
+            if mount_point is None or mountinfo[4] == mount_point:
+                tags = []
+                for field in mountinfo[6:]:
+                    if field == '-':
+                        break
+                    tags.append(field.split(':')[0])
+                yield MountInfo(root = mountinfo[3],
+                                mount_point = mountinfo[4],
+                                tags = tags)

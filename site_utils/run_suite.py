@@ -41,12 +41,10 @@ This script exits with one of the following codes:
 import argparse
 import ast
 import collections
-from collections import namedtuple
 from datetime import datetime
 from datetime import timedelta
 import functools
 import getpass
-import json
 import logging
 import os
 import re
@@ -59,7 +57,7 @@ from chromite.lib import buildbot_annotations as annotations
 
 from autotest_lib.client.common_lib import control_data
 from autotest_lib.client.common_lib import error
-from autotest_lib.client.common_lib import global_config, enum
+from autotest_lib.client.common_lib import global_config
 from autotest_lib.client.common_lib import priorities
 from autotest_lib.client.common_lib import time_utils
 from autotest_lib.client.common_lib.cros import retry
@@ -67,24 +65,19 @@ from autotest_lib.frontend.afe import rpc_client_lib
 from autotest_lib.frontend.afe.json_rpc import proxy
 from autotest_lib.server import site_utils
 from autotest_lib.server import utils
-from autotest_lib.server.cros import provision
 from autotest_lib.server.cros.dynamic_suite import constants
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 from autotest_lib.server.cros.dynamic_suite import reporting_utils
+from autotest_lib.server.cros.dynamic_suite import suite_common
 from autotest_lib.server.cros.dynamic_suite import tools
 from autotest_lib.site_utils import diagnosis_utils
-from autotest_lib.site_utils import job_overhead
+from autotest_lib.site_utils import run_suite_common
 
 CONFIG = global_config.global_config
 
 _DEFAULT_AUTOTEST_INSTANCE = CONFIG.get_config_value(
         'SERVER', 'hostname', type=str)
 _URL_PATTERN = CONFIG.get_config_value('CROS', 'log_url_pattern', type=str)
-
-# Return code that will be sent back to autotest_rpc_server.py
-RETURN_CODES = enum.Enum(
-        'OK', 'ERROR', 'WARNING', 'INFRA_FAILURE', 'SUITE_TIMEOUT',
-        'BOARD_NOT_AVAILABLE', 'INVALID_OPTIONS')
 
 # Minimum RPC timeout setting for calls expected to take long time, e.g.,
 # create_suite_job. If default socket time (socket.getdefaulttimeout()) is
@@ -164,21 +157,21 @@ class _ReturnResult(object):
             output_dict = output_dict.copy()
         if self.message:
             output_dict['return_message'] = self.message
-        return SuiteResult(self.return_code, output_dict)
+        return run_suite_common.SuiteResult(self.return_code, output_dict)
 
 
 _RETURN_RESULTS = collections.OrderedDict([
-    ('ok', _ReturnResult(RETURN_CODES.OK, '')),
+    ('ok', _ReturnResult(run_suite_common.RETURN_CODES.OK, '')),
 
     ('test_warning', _ReturnResult(
-        RETURN_CODES.WARNING, 'Test job raised warning.')),
+        run_suite_common.RETURN_CODES.WARNING, 'Test job raised warning.')),
     ('suite_warning', _ReturnResult(
-        RETURN_CODES.WARNING, 'Suite job raised warning.')),
+        run_suite_common.RETURN_CODES.WARNING, 'Suite job raised warning.')),
     ('test_retry', _ReturnResult(
-        RETURN_CODES.WARNING, 'Tests were retried.')),
+        run_suite_common.RETURN_CODES.WARNING, 'Tests were retried.')),
 
     ('test_aborted_prestart', _ReturnResult(
-        RETURN_CODES.SUITE_TIMEOUT,
+        run_suite_common.RETURN_CODES.SUITE_TIMEOUT,
         'Tests were aborted before running; suite must have timed out.')),
     # This really indicates a user action or an infra failure. But, suite
     # timeouts cause similar fauilres in the individual tests, so we must
@@ -186,22 +179,22 @@ _RETURN_RESULTS = collections.OrderedDict([
     # result from the suite job will promote the result to suite_timeout.
     ('test_aborted_mystery',
      _ReturnResult(
-             RETURN_CODES.SUITE_TIMEOUT,
+             run_suite_common.RETURN_CODES.SUITE_TIMEOUT,
              'Tests were aborted after running, but before timeout; '
              'Test was manually aborted or parsing results failed: '
              'crbug.com/796348.')),
     ('suite_timeout', _ReturnResult(
-        RETURN_CODES.SUITE_TIMEOUT, 'Suite job timed out.')),
+        run_suite_common.RETURN_CODES.SUITE_TIMEOUT, 'Suite job timed out.')),
 
     ('test_views_missing', _ReturnResult(
-        RETURN_CODES.INFRA_FAILURE, 'No test views found.')),
+        run_suite_common.RETURN_CODES.INFRA_FAILURE, 'No test views found.')),
     ('suite_failed', _ReturnResult(
-        RETURN_CODES.INFRA_FAILURE, 'Suite job failed.')),
+        run_suite_common.RETURN_CODES.INFRA_FAILURE, 'Suite job failed.')),
     ('provision_failed', _ReturnResult(
-        RETURN_CODES.INFRA_FAILURE, 'Provisioning failed.')),
+        run_suite_common.RETURN_CODES.INFRA_FAILURE, 'Provisioning failed.')),
 
     ('test_failure', _ReturnResult(
-        RETURN_CODES.ERROR, 'Tests failed.')),
+        run_suite_common.RETURN_CODES.ERROR, 'Tests failed.')),
 ])
 _RETURN_RESULTS_LIST = list(_RETURN_RESULTS.values())
 
@@ -671,9 +664,9 @@ class LogLink(object):
         """
         if not self.testname or self.testname in self._SKIP_RETRY_DASHBOARD:
             return None
-        return annotations.StepLink(
-            text='[Flake-Dashboard]: %s' % self.testname,
-            url=reporting_utils.link_retry_url(self.testname))
+
+        # TODO(xixuan): Return the right flake dashboard later.
+        return None
 
     def GenerateHistoryLink(self):
         """Generate a link to the test history dashboard.
@@ -1625,36 +1618,6 @@ class ResultCollector(object):
             runtime_in_secs = (self.timings.tests_end_time -
                     self.timings.suite_start_time).total_seconds()
 
-        job_overhead.record_suite_runtime(self._suite_job_id, self._suite_name,
-                self._board, self._build, self._num_child_jobs, runtime_in_secs)
-
-
-
-def _make_builds_from_options(options):
-    """Create a dict of builds for creating a suite job.
-
-    The returned dict maps version label prefixes to build names.  Together,
-    each key-value pair describes a complete label.
-
-    @param options: SimpleNamespace from argument parsing.
-
-    @return: dict mapping version label prefixes to build names
-    """
-    builds = {}
-    build_prefix = None
-    if options.build:
-        build_prefix = provision.get_version_label_prefix(options.build)
-        builds[build_prefix] = options.build
-    if options.cheets_build:
-        builds[provision.CROS_ANDROID_VERSION_PREFIX] = options.cheets_build
-        if build_prefix == provision.CROS_VERSION_PREFIX:
-            builds[build_prefix] += provision.CHEETS_SUFFIX
-    if options.firmware_rw_build:
-        builds[provision.FW_RW_VERSION_PREFIX] = options.firmware_rw_build
-    if options.firmware_ro_build:
-        builds[provision.FW_RO_VERSION_PREFIX] = options.firmware_ro_build
-    return builds
-
 
 def _make_child_deps_from_options(options):
     """Creates a list of extra dependencies for child jobs.
@@ -1697,7 +1660,7 @@ def create_suite(afe, options):
         'create_suite_job',
         name=options.name,
         board=options.board,
-        builds=_make_builds_from_options(options),
+        builds=suite_common.make_builds_from_options(options),
         test_source_build=options.test_source_build,
         check_hosts=not options.no_wait,
         pool=options.pool,
@@ -1717,18 +1680,6 @@ def create_suite(afe, options):
         test_args=options.test_args,
         child_dependencies=_make_child_deps_from_options(options),
     )
-
-
-class SuiteResult(namedtuple('SuiteResult', ['return_code', 'output_dict'])):
-    """Result of running a suite to return."""
-
-    def __new__(cls, return_code, output_dict=None):
-        if output_dict is None:
-            output_dict = dict()
-        else:
-            output_dict = output_dict.copy()
-        output_dict['return_code'] = return_code
-        return super(SuiteResult, cls).__new__(cls, return_code, output_dict)
 
 
 def _run_suite(options):
@@ -1778,11 +1729,13 @@ def _run_suite(options):
         except (error.CrosDynamicSuiteException,
                 error.RPCException, proxy.JSONRPCException) as e:
             logging.exception('Error Message: %s', e)
-            return SuiteResult(RETURN_CODES.INFRA_FAILURE,
-                               {'return_message': str(e)})
+            return run_suite_common.SuiteResult(
+                    run_suite_common.RETURN_CODES.INFRA_FAILURE,
+                    {'return_message': str(e)})
         except AttributeError as e:
             logging.exception('Error Message: %s', e)
-            return SuiteResult(RETURN_CODES.INVALID_OPTIONS)
+            return run_suite_common.SuiteResult(
+                    run_suite_common.RETURN_CODES.INVALID_OPTIONS)
 
     job_timer = diagnosis_utils.JobTimer(
             job_created_on, float(options.timeout_mins))
@@ -1798,7 +1751,9 @@ def _run_suite(options):
     if options.create_and_return:
         msg = '--create_and_return was specified, terminating now.'
         logging.info(msg)
-        return SuiteResult(RETURN_CODES.OK, {'return_message': msg})
+        return run_suite_common.SuiteResult(
+                run_suite_common.RETURN_CODES.OK,
+                {'return_message': msg})
 
     if options.no_wait:
         return _handle_job_nowait(job_id, options, instance_server)
@@ -1967,8 +1922,9 @@ def _handle_job_nowait(job_id, options, instance_server):
     for generate_link in link.GenerateBuildbotLinks():
         logging.info(generate_link)
     logging.info('--no_wait specified; Exiting.')
-    return SuiteResult(RETURN_CODES.OK,
-                       {'return_message': '--no_wait specified; Exiting.'})
+    return run_suite_common.SuiteResult(
+            run_suite_common.RETURN_CODES.OK,
+            {'return_message': '--no_wait specified; Exiting.'})
 
 
 def _should_run(options):
@@ -2033,14 +1989,14 @@ def _run_task(options):
     try:
         return _run_suite(options)
     except diagnosis_utils.BoardNotAvailableError as e:
-        result = SuiteResult(
-            RETURN_CODES.BOARD_NOT_AVAILABLE,
+        result = run_suite_common.SuiteResult(
+            run_suite_common.RETURN_CODES.BOARD_NOT_AVAILABLE,
             {'return_message': 'Skipping testing: %s' % e.message})
         logging.info(result.output_dict['return_message'])
         return result
     except utils.TestLabException as e:
-        result = SuiteResult(
-            RETURN_CODES.INFRA_FAILURE,
+        result = run_suite_common.SuiteResult(
+            run_suite_common.RETURN_CODES.INFRA_FAILURE,
             {'return_message': 'TestLabException: %s' % e})
         logging.exception(result.output_dict['return_message'])
         return result
@@ -2059,9 +2015,10 @@ class _ExceptionHandler(object):
 
     def __call__(self, exc_type, value, traceback):
         if self._should_dump_json:
-            _dump_json({'return_message': ('Unhandled run_suite exception: %s'
-                                           % value)})
-        sys.exit(RETURN_CODES.INFRA_FAILURE)
+            run_suite_common.dump_json(
+                    {'return_message': ('Unhandled run_suite exception: %s'
+                                        % value)})
+        sys.exit(run_suite_common.RETURN_CODES.INFRA_FAILURE)
 
 
 def main():
@@ -2082,32 +2039,27 @@ def main():
     utils.setup_logging()
     if not options_okay:
         parser.print_help()
-        result = SuiteResult(RETURN_CODES.INVALID_OPTIONS)
+        result = run_suite_common.SuiteResult(
+                run_suite_common.RETURN_CODES.INVALID_OPTIONS)
     elif options.pre_check and not _should_run(options):
         logging.info('Suite %s-%s is terminated: Lab is closed, OR build is '
                      'blocked, OR this suite has already been kicked off '
                      'once in past %d days.',
                      options.test_source_build, options.name,
                      _SEARCH_JOB_MAX_DAYS)
-        result = SuiteResult(
-            RETURN_CODES.ERROR,
+        result = run_suite_common.SuiteResult(
+            run_suite_common.RETURN_CODES.ERROR,
             {'return_message': ("Lab is closed OR other reason"
                                 " (see code, it's complicated)")})
     else:
         result = _run_task(options)
 
     if options.json_dump:
-        _dump_json(result.output_dict)
+        run_suite_common.dump_json(result.output_dict)
 
     logging.info('Will return from run_suite with status: %s',
-                  RETURN_CODES.get_string(result.return_code))
+                  run_suite_common.RETURN_CODES.get_string(result.return_code))
     return result.return_code
-
-
-def _dump_json(obj):
-    """Write obj JSON to stdout."""
-    output_json = json.dumps(obj, sort_keys=True)
-    sys.stdout.write('#JSON_START#%s#JSON_END#' % output_json.strip())
 
 
 if __name__ == "__main__":

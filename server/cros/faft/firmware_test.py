@@ -205,7 +205,17 @@ class FirmwareTest(FAFTBase):
             'rw_fwid': self.faft_client.system.get_crossystem_value('fwid'),
             'servod_version': self._client._servo_host.run(
                 'servod --version').stdout.strip(),
+            'os_version': self._client.get_release_builder_path(),
+            'servo_type': self.servo.get_servo_version()
         }
+
+        # Record the servo v4 and servo micro versions when possible
+        if 'servo_micro' in system_info['servo_type']:
+            system_info['servo_micro_version'] = self.servo.get(
+                    'servo_micro_version')
+
+        if 'servo_v4' in system_info['servo_type']:
+            system_info['servo_v4_version'] = self.servo.get('servo_v4_version')
 
         if hasattr(self, 'cr50'):
             system_info['cr50_version'] = self.servo.get('cr50_version')
@@ -1001,8 +1011,23 @@ class FirmwareTest(FAFTBase):
         # add buffer from the default timeout of 60 seconds.
         self.switcher.wait_for_client_offline(timeout=100, orig_boot_id=boot_id)
         time.sleep(self.faft_config.shutdown)
+        if self.check_ec_capability(['x86'], suppress_warning=True):
+            self.check_shutdown_power_state("G3", pwr_retries=5)
         # Short press power button to boot DUT again.
         self.servo.power_key(self.faft_config.hold_pwr_button_poweron)
+
+    def check_shutdown_power_state(self, power_state, pwr_retries):
+        """Check whether the device entered into requested EC power state
+        after shutdown.
+
+        @param power_state: EC power state has to be checked. Either S5 or G3.
+        @param pwr_retries: Times to check if the DUT in expected power state.
+        @raise TestFail: If device failed to enter into requested power state.
+        """
+        if not self.wait_power_state(power_state, pwr_retries):
+            raise error.TestFail('System not shutdown properly and EC fails '
+                                 'to enter into %s state.' % power_state)
+        logging.info('System entered into %s state..', power_state)
 
     def check_lid_and_power_on(self):
         """
@@ -1135,11 +1160,7 @@ class FirmwareTest(FAFTBase):
                     shutdown_action.__name__)
         except ConnectionError:
             if self.check_ec_capability(['x86'], suppress_warning=True):
-                PWR_RETRIES=5
-                if not self.wait_power_state("G3", PWR_RETRIES):
-                    raise error.TestFail("System not shutdown properly and EC"
-                                         "fails to enter into G3 state.")
-                logging.info('System entered into G3 state..')
+                self.check_shutdown_power_state("G3", pwr_retries=5)
             logging.info(
                 'DUT is surely shutdown. We are going to power it on again...')
 

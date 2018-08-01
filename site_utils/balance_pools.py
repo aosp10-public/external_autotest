@@ -54,13 +54,15 @@ DUTs, if it's necessary to achieve the target COUNT.
 
 
 import argparse
+import os
+import re
 import sys
 import time
 
 import common
 from autotest_lib.server import constants
-from autotest_lib.server import frontend
 from autotest_lib.server import site_utils
+from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 from autotest_lib.server.lib import status_history
 from autotest_lib.site_utils import lab_inventory
 from autotest_lib.utils import labellib
@@ -78,6 +80,17 @@ _MAX_BROKEN_DEFAULT_RATIO = 3.0 / 8.0
 
 _ALL_CRITICAL_POOLS = 'all_critical_pools'
 _SPARE_DEFAULT = lab_inventory.SPARE_POOL
+
+
+# _VALID_POOL_PATTERN - Regular expression matching pool names that will
+# be accepted on the command line.
+#
+# Note: This pattern was selected merely to recognize all existing pool
+# names; there's no underlying technical restriction motivating this
+# pattern.  No reasonable request to add more special characters to the
+# allowed set should be refused.
+
+_VALID_POOL_PATTERN = re.compile('^[a-zA-z0-9_\-]+$')
 
 
 def _log_message(message, *args):
@@ -502,7 +515,7 @@ def _parse_command(argv):
 
     """
     parser = argparse.ArgumentParser(
-            prog=argv[0],
+            prog=os.path.basename(argv[0]),
             description='Balance pool shortages from spares on reserve')
 
     parser.add_argument(
@@ -582,6 +595,9 @@ def _parse_command(argv):
         arguments.spare != _SPARE_DEFAULT):
         parser.error('Cannot specify --spare pool to be %s when balancing all '
                      'critical pools.' % _SPARE_DEFAULT)
+    for p in (arguments.spare, arguments.pool):
+        if not _VALID_POOL_PATTERN.match(p):
+            parser.error('Invalid pool name: %s' % p)
     return arguments
 
 
@@ -607,7 +623,7 @@ def infer_balancer_targets(afe, arguments, pools):
                            'too many models with at least 1 broken DUT '
                            'detected.', pool)
             else:
-                for model in inventory.get_models(pool):
+                for model in inventory.get_pool_models(pool):
                     labels = labellib.LabelsMapping()
                     labels['model'] = model
                     balancer_targets.append((pool, labels.getlabels()))
@@ -633,44 +649,40 @@ def main(argv):
     """
     arguments = _parse_command(argv)
     if arguments.production:
-        metrics_manager = site_utils.SetupTsMonGlobalState(
-                'balance_pools',
-                indirect=False,
-                auto_flush=False,
-        )
+        metrics_manager = site_utils.SetupTsMonGlobalState('balance_pools',
+                                                           indirect=True)
     else:
         metrics_manager = site_utils.TrivialContextManager()
 
     with metrics_manager:
-        end_time = time.time()
-        start_time = end_time - 24 * 60 * 60
-        afe = frontend.AFE(server=arguments.web)
+        with metrics.SuccessCounter('chromeos/autotest/balance_pools/runs'):
+            end_time = time.time()
+            start_time = end_time - 24 * 60 * 60
+            afe = frontend_wrappers.RetryingAFE(server=arguments.web)
 
-        def balancer(pool, labels):
-            """Balance the specified model.
+            def balancer(pool, labels):
+                """Balance the specified model.
 
-            @param pool: The pool to rebalance for the model.
-            @param labels: labels to restrict to balancing operations
-                    within.
-            """
-            _balance_model(arguments, afe, pool, labels,
-                           start_time, end_time)
-            _log_message('')
+                @param pool: The pool to rebalance for the model.
+                @param labels: labels to restrict to balancing operations
+                        within.
+                """
+                _balance_model(arguments, afe, pool, labels,
+                               start_time, end_time)
+                _log_message('')
 
-        pools = (lab_inventory.CRITICAL_POOLS
-                if arguments.pool == _ALL_CRITICAL_POOLS
-                else [arguments.pool])
-        balancer_targets = infer_balancer_targets(afe, arguments, pools)
-        try:
-            parallel.RunTasksInProcessPool(
-                    balancer,
-                    balancer_targets,
-                    processes=8,
-            )
-        except KeyboardInterrupt:
-            pass
-        finally:
-            metrics.Flush()
+            pools = (lab_inventory.CRITICAL_POOLS
+                    if arguments.pool == _ALL_CRITICAL_POOLS
+                    else [arguments.pool])
+            balancer_targets = infer_balancer_targets(afe, arguments, pools)
+            try:
+                parallel.RunTasksInProcessPool(
+                        balancer,
+                        balancer_targets,
+                        processes=8,
+                )
+            except KeyboardInterrupt:
+                pass
 
 
 if __name__ == '__main__':

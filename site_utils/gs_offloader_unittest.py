@@ -70,8 +70,10 @@ class OffloaderOptionsTests(mox.MoxTestBase):
 
     """
 
-    _REGULAR_ONLY = set([job_directories.RegularJobDirectory])
-    _SPECIAL_ONLY = set([job_directories.SpecialJobDirectory])
+    _REGULAR_ONLY = {job_directories.SwarmingJobDirectory,
+                     job_directories.RegularJobDirectory}
+    _SPECIAL_ONLY = {job_directories.SwarmingJobDirectory,
+                     job_directories.SpecialJobDirectory}
     _BOTH = _REGULAR_ONLY | _SPECIAL_ONLY
 
 
@@ -485,11 +487,7 @@ class JobDirectorySubclassTests(mox.MoxTestBase):
 
     def setUp(self):
         super(JobDirectorySubclassTests, self).setUp()
-        self.mox.StubOutWithMock(job_directories._AFE, 'get_jobs')
-        self.mox.StubOutWithMock(job_directories._AFE,
-                                 'get_host_queue_entries')
-        self.mox.StubOutWithMock(job_directories._AFE,
-                                 'get_special_tasks')
+        self.mox.StubOutWithMock(job_directories, '_AFE')
 
 
     def test_regular_job_fields(self):
@@ -502,7 +500,7 @@ class JobDirectorySubclassTests(mox.MoxTestBase):
         resultsdir = '118-fubar'
         job = job_directories.RegularJobDirectory(resultsdir)
         self.assertEqual(job.dirname, resultsdir)
-        self.assertEqual(job._id, 118)
+        self.assertEqual(job._id, '118')
 
 
     def test_special_job_fields(self):
@@ -516,7 +514,7 @@ class JobDirectorySubclassTests(mox.MoxTestBase):
         resultsdir = destdir + '/118-reset'
         job = job_directories.SpecialJobDirectory(resultsdir)
         self.assertEqual(job.dirname, resultsdir)
-        self.assertEqual(job._id, 118)
+        self.assertEqual(job._id, '118')
 
 
     def _check_finished_job(self, jobtime, hqetimes, expected):
@@ -991,8 +989,10 @@ class OffloadDirectoryTests(_TempResultsDirTestBase):
             release_build, gs_offloader.CTS_RESULT_PATTERN, 'arc-cts'))
         self.assertTrue(gs_offloader._is_valid_result(
             release_build, gs_offloader.CTS_RESULT_PATTERN, 'test_that_wrapper'))
-        self.assertFalse(gs_offloader._is_valid_result(
+        self.assertTrue(gs_offloader._is_valid_result(
             release_build, gs_offloader.CTS_RESULT_PATTERN, 'bvt-arc'))
+        self.assertFalse(gs_offloader._is_valid_result(
+            release_build, gs_offloader.CTS_RESULT_PATTERN, 'bvt-cq'))
         self.assertTrue(gs_offloader._is_valid_result(
             release_build, gs_offloader.CTS_V2_RESULT_PATTERN, 'arc-gts'))
         self.assertFalse(gs_offloader._is_valid_result(
@@ -1069,13 +1069,16 @@ class OffloadDirectoryTests(_TempResultsDirTestBase):
 
         self.mox.StubOutWithMock(gs_offloader, '_upload_files')
         gs_offloader._upload_files(
-            mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg(), False).AndReturn(
+            mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg(), False,
+                mox.IgnoreArg(), mox.IgnoreArg()).AndReturn(
                 ['test', '-d', host_folder])
         gs_offloader._upload_files(
-            mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg(), False).AndReturn(
+            mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg(), False,
+                mox.IgnoreArg(), mox.IgnoreArg()).AndReturn(
                 ['test', '-d', host_folder])
         gs_offloader._upload_files(
-            mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg(), False).AndReturn(
+            mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg(), False,
+                mox.IgnoreArg(), mox.IgnoreArg()).AndReturn(
                 ['test', '-d', host_folder])
 
         self.mox.ReplayAll()
@@ -1103,7 +1106,9 @@ class OffloadDirectoryTests(_TempResultsDirTestBase):
                     ['test', '-d', path])
 
             self.mox.ReplayAll()
-            gs_offloader._upload_files(host_folder, path, pattern, False)
+            gs_offloader._upload_files(host_folder, path, pattern, False,
+                                       'gs://a-test-bucket/',
+                                       'gs://a-test-apfe-bucket/')
             self.mox.VerifyAll()
             self.mox.ResetAll()
 

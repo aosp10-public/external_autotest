@@ -200,6 +200,7 @@ class GraphicsTest(test.test):
         if name in target['names']:
             target['names'].remove(name)
 
+
     def _output_perf(self):
         """Report recorded failures back to chrome perf."""
         self.output_perf_value(
@@ -216,8 +217,9 @@ class GraphicsTest(test.test):
         total_failures = 0
         # Report subtests failures
         for failure in self._failures:
-            logging.debug('GraphicsTest failure: %s' % failure['names'])
-            total_failures += len(failure['names'])
+            if len(failure['names']) > 0:
+                logging.debug('GraphicsTest failure: %s' % failure['names'])
+                total_failures += len(failure['names'])
 
             if not self._test_failure_report_subtest:
                 continue
@@ -354,6 +356,7 @@ UINPUT_DEVICE_EVENTS_KEYBOARD = [
     uinput.KEY_LEFTALT,
     uinput.KEY_A,
     uinput.KEY_M,
+    uinput.KEY_Q,
     uinput.KEY_V
 ]
 # TODO(ihf): Find an ABS sequence that actually works.
@@ -520,56 +523,6 @@ def take_screenshot(resultsdir, fname_prefix, extension='png'):
         logging.error(err)
 
     return screenshot_file
-
-
-def take_screenshot_crop_by_height(fullpath, final_height, x_offset_pixels,
-                                   y_offset_pixels):
-    """
-    Take a screenshot, crop to final height starting at given (x, y) coordinate.
-    Image width will be adjusted to maintain original aspect ratio).
-
-    @param fullpath: path, fullpath of the file that will become the image file.
-    @param final_height: integer, height in pixels of resulting image.
-    @param x_offset_pixels: integer, number of pixels from left margin
-                            to begin cropping.
-    @param y_offset_pixels: integer, number of pixels from top margin
-                            to begin cropping.
-    """
-    image = gbm.crtcScreenshot()
-    image.crop()
-    width, height = image.size
-    # Preserve aspect ratio: Wf / Wi == Hf / Hi
-    final_width = int(width * (float(final_height) / height))
-    box = (x_offset_pixels, y_offset_pixels,
-           x_offset_pixels + final_width, y_offset_pixels + final_height)
-    cropped = image.crop(box)
-    cropped.save(fullpath)
-    return fullpath
-
-
-def take_screenshot_crop_x(fullpath, box=None):
-    """
-    Take a screenshot using import tool, crop according to dim given by the box.
-    @param fullpath: path, full path to save the image to.
-    @param box: 4-tuple giving the upper left and lower right pixel coordinates.
-    """
-
-    if box:
-        img_w, img_h, upperx, uppery = box
-        cmd = ('/usr/local/bin/import -window root -depth 8 -crop '
-                      '%dx%d+%d+%d' % (img_w, img_h, upperx, uppery))
-    else:
-        cmd = ('/usr/local/bin/import -window root -depth 8')
-
-    old_exc_type = sys.exc_info()[0]
-    try:
-        utils.system('%s %s' % (cmd, fullpath))
-    except Exception as err:
-        # Do not raise an exception if the screenshot fails while processing
-        # another exception.
-        if old_exc_type is None:
-            raise
-        logging.error(err)
 
 
 def take_screenshot_crop(fullpath, box=None, crtc_id=None):

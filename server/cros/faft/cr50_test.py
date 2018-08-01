@@ -5,18 +5,19 @@
 import logging
 import os
 import pprint
+import StringIO
+import subprocess
+import time
 
 from autotest_lib.client.bin import utils
-from autotest_lib.client.common_lib import error
+from autotest_lib.client.common_lib import error, utils
 from autotest_lib.client.common_lib.cros import cr50_utils, tpm_utils
 from autotest_lib.server.cros import debugd_dev_tools, gsutil_wrapper
 from autotest_lib.server.cros.faft.firmware_test import FirmwareTest
 
 
 class Cr50Test(FirmwareTest):
-    """
-    Base class that sets up helper objects/functions for cr50 tests.
-    """
+    """Base class that sets up helper objects/functions for cr50 tests."""
     version = 1
 
     CR50_GS_URL = 'gs://chromeos-localmirror-private/distfiles/chromeos-cr50-%s/'
@@ -28,9 +29,10 @@ class Cr50Test(FirmwareTest):
     # Saved the original image, the device image, and the debug image. These
     # images are needed to be able to restore the original image and board id.
     IMAGES = 1 << 1
+    ONE_SECOND = 1
 
-    def initialize(self, host, cmdline_args, restore_cr50_state=False,
-                   cr50_dev_path='', provision_update=False):
+    def initialize(self, host, cmdline_args, full_args,
+            restore_cr50_state=False, cr50_dev_path='', provision_update=False):
         self._saved_state = self.NONE
         self._raise_error_on_mismatch = not restore_cr50_state
         self._provision_update = provision_update
@@ -40,7 +42,25 @@ class Cr50Test(FirmwareTest):
             raise error.TestNAError('Test can only be run on devices with '
                                     'access to the Cr50 console')
 
+        logging.info('Test Args: %r', full_args)
+        self.ccd_lockout = full_args.get('ccd_lockout', '').lower() == 'true'
+        logging.info('ccd is%s locked out', '' if self.ccd_lockout else ' not')
+
+        self.can_set_ccd_level = (not self.cr50.using_ccd() or
+            self.cr50.testlab_is_on()) and not self.ccd_lockout
+        self.original_ccd_level = self.cr50.get_ccd_level()
+        self.original_ccd_settings = self.cr50.get_cap_dict()
+
+        # Clear the TPM owner so the FWMP can't disable CCD.
         self.host = host
+        tpm_utils.ClearTPMOwnerRequest(self.host, wait_for_ready=True)
+
+        if self.can_set_ccd_level:
+            # Lock cr50 so the console will be restricted
+            self.cr50.set_ccd_level('lock')
+        elif self.original_ccd_level != 'lock':
+            raise error.TestNAError('Lock the console before running cr50 test')
+
         self._save_original_state()
         # We successfully saved the device state
         self._saved_state |= self.INITIAL_STATE
@@ -128,7 +148,7 @@ class Cr50Test(FirmwareTest):
 
 
     def get_saved_cr50_original_version(self):
-        """Return (ro ver, rw ver, bid)"""
+        """Return (ro ver, rw ver, bid)."""
         if ('running_ver' not in self._original_state or 'cr50_image_bid' not in
             self._original_state):
             raise error.TestError('No record of original cr50 image version')
@@ -138,19 +158,19 @@ class Cr50Test(FirmwareTest):
 
 
     def get_saved_cr50_original_path(self):
-        """Return the local path for the original cr50 image"""
+        """Return the local path for the original cr50 image."""
         if not hasattr(self, '_original_cr50_image'):
             raise error.TestError('No record of original image')
         return self._original_cr50_image
 
 
     def has_saved_cr50_dev_path(self):
-        """Returns true if we saved the node locked debug image"""
+        """Returns true if we saved the node locked debug image."""
         return hasattr(self, '_node_locked_cr50_image')
 
 
     def get_saved_cr50_dev_path(self):
-        """Return the local path for the cr50 dev image"""
+        """Return the local path for the cr50 dev image."""
         if not self.has_saved_cr50_dev_path():
             raise error.TestError('No record of debug image')
         return self._node_locked_cr50_image
@@ -185,14 +205,14 @@ class Cr50Test(FirmwareTest):
 
 
     def rootfs_verification_disable(self):
-        """Remove rootfs verification"""
+        """Remove rootfs verification."""
         if not self._rootfs_verification_is_disabled():
             logging.debug('Removing rootfs verification.')
             self.rootfs_tool.enable()
 
 
     def _rootfs_verification_is_disabled(self):
-        """Returns true if rootfs verification is enabled"""
+        """Returns true if rootfs verification is enabled."""
         # Clear the TPM owner before trying to check rootfs verification
         tpm_utils.ClearTPMOwnerRequest(self.host, wait_for_ready=True)
         self.rootfs_tool = debugd_dev_tools.RootfsVerificationTool()
@@ -203,7 +223,7 @@ class Cr50Test(FirmwareTest):
 
 
     def _restore_original_state(self):
-        """Restore the original cr50 related device state"""
+        """Restore the original cr50 related device state."""
         if not (self._saved_state & self.IMAGES):
             logging.warning('Did not save the original images. Cannot restore '
                             'state')
@@ -241,7 +261,7 @@ class Cr50Test(FirmwareTest):
 
 
     def get_cr50_device_state(self):
-        """Get a dict with the current device cr50 information
+        """Get a dict with the current device cr50 information.
 
         The state dict will include the platform brand, rlz code, chip board id,
         the running cr50 image version, the running cr50 image board id, and the
@@ -269,7 +289,7 @@ class Cr50Test(FirmwareTest):
 
 
     def _check_original_state(self):
-        """Compare the current cr50 state to the original state
+        """Compare the current cr50 state to the original state.
 
         Returns:
             A dictionary with the state that is wrong as the key and
@@ -297,20 +317,55 @@ class Cr50Test(FirmwareTest):
         return mismatch
 
 
+    def _reset_ccd_settings(self):
+        """Reset the ccd lock and capability states."""
+        # Clear the password if one was set.
+        if self.cr50.get_ccd_info()['Password'] != 'none':
+            self.servo.set_nocheck('cr50_testlab', 'open')
+            self.cr50.send_command('ccd reset')
+            if self.cr50.get_ccd_info()['Password'] != 'none':
+                raise error.TestFail('Could not clear password')
+
+        current_settings = self.cr50.get_cap_dict()
+        if self.original_ccd_settings != current_settings:
+            if not self.can_set_ccd_level:
+                raise error.TestError("CCD state has changed, but we can't "
+                        "restore it")
+            self.fast_open(True)
+            self.cr50.set_caps(self.original_ccd_settings)
+
+        # First try using testlab open to open the device
+        if self.cr50.testlab_is_on() and self.original_ccd_level == 'open':
+            self.servo.set_nocheck('cr50_testlab', 'open')
+        if self.original_ccd_level != self.cr50.get_ccd_level():
+            self.cr50.set_ccd_level(self.original_ccd_level)
+
+
+
     def cleanup(self):
         """Make sure the device state is the same as the start of the test"""
-        state_mismatch = self._check_original_state()
+        # reboot to normal mode if the device is in dev mode.
+        if 'dev_mode' in self.cr50.get_ccd_info()['TPM']:
+            self.switcher.reboot_to_mode(to_mode='normal')
 
+        tpm_utils.ClearTPMOwnerRequest(self.host, wait_for_ready=True)
+
+        state_mismatch = self._check_original_state()
         if state_mismatch and not self._provision_update:
             self._restore_original_state()
             if self._raise_error_on_mismatch:
                 raise error.TestError('Unexpected state mismatch during '
                                       'cleanup %s' % state_mismatch)
+
+        # Restore the ccd privilege level
+        if hasattr(self, 'original_ccd_level'):
+            self._reset_ccd_settings()
+
         super(Cr50Test, self).cleanup()
 
 
     def find_cr50_gs_image(self, filename, image_type=None):
-        """Find the cr50 gs image name
+        """Find the cr50 gs image name.
 
         Args:
             filename: the cr50 filename to match to
@@ -327,7 +382,7 @@ class Cr50Test(FirmwareTest):
 
     def download_cr50_gs_image(self, filename, image_bid='', bucket=None,
                                image_type=None):
-        """Get the image from gs and save it in the autotest dir
+        """Get the image from gs and save it in the autotest dir.
 
         Args:
             filename: The cr50 image basename
@@ -372,7 +427,7 @@ class Cr50Test(FirmwareTest):
 
 
     def download_cr50_debug_image(self, devid, image_bid=''):
-        """download the cr50 debug file
+        """download the cr50 debug file.
 
         Get the file with the matching devid and image board id info
 
@@ -393,19 +448,19 @@ class Cr50Test(FirmwareTest):
         return dest, ver
 
 
-    def download_cr50_release_image(self, rw_ver, image_bid=''):
-        """download the cr50 release file
+    def download_cr50_release_image(self, image_rw, image_bid=''):
+        """download the cr50 release file.
 
         Get the file with the matching version and image board id info
 
         Args:
-            rw_ver: the rw version string
+            image_rw: the rw version string
             image_bid: the image board id info string or list
         Returns:
             A tuple with the release image local path and version
         """
         # Release images can be found using the rw version
-        filename = self.CR50_PROD_FILE % rw_ver
+        filename = self.CR50_PROD_FILE % image_rw
 
         # Download the image
         dest, ver = self.download_cr50_gs_image(filename, image_bid=image_bid,
@@ -413,17 +468,17 @@ class Cr50Test(FirmwareTest):
 
         # Compare the rw version and board id info to make sure the right image
         # was found
-        if rw_ver != ver[1]:
+        if image_rw != ver[1]:
             raise error.TestError('Could not download image with matching '
                                   'rw version')
         return dest, ver
 
 
-    def _cr50_verify_update(self, expected_ver, expect_rollback):
-        """Verify the expected version is running on cr50
+    def _cr50_verify_update(self, expected_rw, expect_rollback):
+        """Verify the expected version is running on cr50.
 
         Args:
-            expect_ver: The RW version string we expect to be running
+            expected_rw: The RW version string we expect to be running
             expect_rollback: True if cr50 should have rolled back during the
                              update
 
@@ -431,21 +486,21 @@ class Cr50Test(FirmwareTest):
             TestFail if there is any unexpected update state
         """
         errors = []
-        running_ver = self.cr50.get_version()
-        if expected_ver != running_ver:
-            errors.append('running %s not %s' % (running_ver, expected_ver))
+        running_rw = self.cr50.get_version()
+        if expected_rw != running_rw:
+            errors.append('running %s not %s' % (running_rw, expected_rw))
 
         if expect_rollback != self.cr50.rolledback():
             errors.append('%srollback detected' %
                           'no ' if expect_rollback else '')
         if len(errors):
             raise error.TestFail('cr50_update failed: %s' % ', '.join(errors))
-        logging.info('RUNNING %s after %s', expected_ver,
+        logging.info('RUNNING %s after %s', expected_rw,
                      'rollback' if expect_rollback else 'update')
 
 
     def _cr50_run_update(self, path):
-        """Install the image at path onto cr50
+        """Install the image at path onto cr50.
 
         Args:
             path: the location of the image to update to
@@ -456,7 +511,7 @@ class Cr50Test(FirmwareTest):
         tmp_dest = '/tmp/' + os.path.basename(path)
 
         dest, image_ver = cr50_utils.InstallImage(self.host, path, tmp_dest)
-        cr50_utils.UsbUpdater(self.host, ['-a', dest])
+        cr50_utils.GSCTool(self.host, ['-a', dest])
         return image_ver[1]
 
 
@@ -481,13 +536,13 @@ class Cr50Test(FirmwareTest):
         Raises:
             TestFail if the update failed
         """
-        original_ver = self.cr50.get_version()
+        original_rw = self.cr50.get_version()
 
         # Cr50 is going to reject an update if it hasn't been up for more than
         # 60 seconds. Wait until that passes before trying to run the update.
         self.cr50.wait_until_update_is_allowed()
 
-        rw_ver = self._cr50_run_update(path)
+        image_rw = self._cr50_run_update(path)
 
         # Running the update may cause cr50 to reboot. Wait for that before
         # sending more commands. The reboot should happen quickly. Wait a
@@ -500,6 +555,175 @@ class Cr50Test(FirmwareTest):
         if rollback:
             self.cr50.rollback(chip_bid=chip_bid, chip_flags=chip_flags)
 
-        expected_ver = original_ver if expect_rollback else rw_ver
+        expected_rw = original_rw if expect_rollback else image_rw
         # If we expect a rollback, the version should remain unchanged
-        self._cr50_verify_update(expected_ver, rollback or expect_rollback)
+        self._cr50_verify_update(expected_rw, rollback or expect_rollback)
+
+
+    def ccd_open_from_ap(self):
+        """Start the open process and press the power button."""
+        self._ccd_open_last_len = 0
+
+        self._ccd_open_stdout = StringIO.StringIO()
+
+        ccd_open_cmd = utils.sh_escape('gsctool -a -o')
+        full_ssh_cmd = '%s "%s"' % (self.host.ssh_command(options='-tt'),
+            ccd_open_cmd)
+        # Start running the Cr50 Open process in the background.
+        self._ccd_open_job = utils.BgJob(full_ssh_cmd,
+                                         nickname='ccd_open',
+                                         stdout_tee=self._ccd_open_stdout,
+                                         stderr_tee=utils.TEE_TO_LOGS)
+
+        if self._ccd_open_job == None:
+            raise error.TestFail('could not start ccd open')
+
+        try:
+            # Quickly run the short presses
+            for i in range(self.cr50.CCD_SHORT_PRESSES):
+                self.servo.power_short_press()
+                time.sleep(self.ONE_SECOND)
+            # Poll the output and press the power button for the longer presses.
+            utils.wait_for_value(self._check_open_and_press_power_button,
+                expected_value=True, timeout_sec=self.cr50.PP_LONG)
+        except Exception, e:
+            logging.info(e)
+            raise
+        finally:
+            self._close_ccd_open_job()
+        logging.info(self.cr50.get_ccd_info())
+
+
+    def _check_open_and_press_power_button(self):
+        """Check stdout and press the power button if prompted.
+
+        Returns:
+            True if the process is still running.
+        """
+        logging.info(self._get_ccd_open_output())
+        self.servo.power_short_press()
+        logging.info('pressed power button')
+        time.sleep(self.ONE_SECOND)
+        return (self._ccd_open_job.sp.poll() is not None or 'Open' in
+                self.cr50.get_ccd_info()['State'])
+
+
+    def _get_ccd_open_output(self):
+        """Read the new output."""
+        self._ccd_open_job.process_output()
+        self._ccd_open_stdout.seek(self._ccd_open_last_len)
+        output = self._ccd_open_stdout.read()
+        self._ccd_open_last_len = self._ccd_open_stdout.len
+        return output
+
+
+    def _close_ccd_open_job(self):
+        """Terminate the process and check the results."""
+        exit_status = utils.nuke_subprocess(self._ccd_open_job.sp)
+        stdout = self._ccd_open_stdout.getvalue().strip()
+        delattr(self, '_ccd_open_job')
+        if stdout:
+            logging.info('stdout of ccd open:\n%s', stdout)
+        if exit_status:
+            logging.info('exit status: %d', exit_status)
+        if 'Error' in stdout:
+            raise error.TestFail('ccd open Error %s' %
+                                 stdout.split('Error')[-1])
+        if self.cr50.OPEN != self.cr50.get_ccd_level():
+            raise error.TestFail('unable to open cr50: %s' % stdout)
+        else:
+            logging.info('Opened Cr50')
+
+
+    def fast_open(self, enable_testlab=False):
+        """Try to use testlab open. If that fails, do regular ap open.
+
+        Args:
+            enable_testlab: If True, enable testlab mode after cr50 is open.
+        """
+        # Try to use testlab open first, so we don't have to wait for the
+        # physical presence check.
+        self.cr50.send_command('ccd testlab open')
+        if self.cr50.get_ccd_level() == 'open':
+            return
+
+        if 'dev_mode' not in self.cr50.get_ccd_info()['TPM']:
+            self.switcher.reboot_to_mode(to_mode='dev')
+        self.ccd_open_from_ap()
+        self.switcher.reboot_to_mode(to_mode='normal')
+        if enable_testlab:
+            self.cr50.set_ccd_testlab('on')
+
+
+    def run_gsctool_cmd_with_password(self, password, cmd, name, expect_error):
+        """Run a gsctool command and input the password
+
+        Args:
+            password: The cr50 password string
+            cmd: The gsctool command
+            name: The name to give the job
+            expect_error: True if the command should fail
+        """
+        set_pwd_cmd = utils.sh_escape(cmd)
+        full_ssh_command = '%s "%s"' % (self.host.ssh_command(options='-tt'),
+            set_pwd_cmd)
+        stdout = StringIO.StringIO()
+        # Start running the gsctool Command in the background.
+        gsctool_job = utils.BgJob(full_ssh_command,
+                                  nickname='%s_with_password' % name,
+                                  stdout_tee=stdout,
+                                  stderr_tee=utils.TEE_TO_LOGS,
+                                  stdin=subprocess.PIPE)
+        if gsctool_job == None:
+            raise error.TestFail('could not start gsctool command %r', cmd)
+
+        try:
+            # Wait for enter prompt
+            gsctool_job.process_output()
+            logging.info(stdout.getvalue().strip())
+            # Enter the password
+            gsctool_job.sp.stdin.write(password + '\n')
+
+            # Wait for re-enter prompt
+            gsctool_job.process_output()
+            logging.info(stdout.getvalue().strip())
+            # Re-enter the password
+            gsctool_job.sp.stdin.write(password + '\n')
+            time.sleep(self.cr50.CONSERVATIVE_CCD_WAIT)
+            gsctool_job.process_output()
+        finally:
+            exit_status = utils.nuke_subprocess(gsctool_job.sp)
+            output = stdout.getvalue().strip()
+            logging.info('%s stdout: %s', name, output)
+            logging.info('%s exit status: %s', name, exit_status)
+            if exit_status:
+                message = ('gsctool %s failed using %r: %s %s' %
+                           (name, password, exit_status, output))
+                if expect_error:
+                    logging.info(message)
+                else:
+                    raise error.TestFail(message)
+            elif expect_error:
+                raise error.TestFail('%s with %r did not fail when expected' %
+                                     (name, password))
+
+
+    def set_ccd_password(self, password, expect_error=False):
+        """Set the ccd password"""
+        # If for some reason the test sets a password and is interrupted before
+        # we can clear it, we want testlab mode to be enabled, so it's possible
+        # to clear the password without knowing it.
+        if not self.cr50.testlab_is_on():
+            raise error.TestError('Will not set password unless testlab mode '
+                                  'is enabled.')
+        self.run_gsctool_cmd_with_password(
+                password, 'gsctool -a -P', 'set_password', expect_error)
+
+
+    def ccd_unlock_from_ap(self, password=None, expect_error=False):
+        """Unlock cr50"""
+        if not password:
+            self.host.run('gsctool -a -U')
+            return
+        self.run_gsctool_cmd_with_password(
+                password, 'gsctool -a -U', 'unlock', expect_error)

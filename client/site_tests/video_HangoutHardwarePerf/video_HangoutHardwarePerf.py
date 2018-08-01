@@ -11,6 +11,8 @@ from autotest_lib.client.cros import chrome_binary_test
 from autotest_lib.client.cros import service_stopper
 from autotest_lib.client.cros.audio import cmd_utils
 from autotest_lib.client.cros.power import power_status, power_utils
+from autotest_lib.client.cros.video import device_capability
+from autotest_lib.client.cros.video import encoder_utils
 from autotest_lib.client.cros.video import helper_logger
 
 # The download base for test assets.
@@ -42,19 +44,11 @@ WAIT_FOR_IDLE_CPU_TIMEOUT = 60
 # Maximum percent of cpu usage considered as idle.
 CPU_IDLE_USAGE = 0.1
 
-# List of thermal throttling services that should be disabled.
-# - temp_metrics for link.
-# - thermal for daisy, snow, pit etc.
-THERMAL_SERVICES = ['temp_metrics', 'thermal']
-
 # Measurement duration in seconds.
 MEASUREMENT_DURATION = 30
 
 # Time to exclude from calculation after playing a video [seconds].
 STABILIZATION_DURATION = 10
-
-# The number of frames used to warm up the rendering.
-RENDERING_WARM_UP = 15
 
 # A big number, used to keep the [vda|vea]_unittest running during the
 # measurement.
@@ -73,7 +67,7 @@ class CpuUsageMeasurer(object):
 
     def __enter__(self):
         # Stop the thermal service that may change the cpu frequency.
-        self._service_stopper = service_stopper.ServiceStopper(THERMAL_SERVICES)
+        self._service_stopper = service_stopper.get_thermal_service_stopper()
         self._service_stopper.stop_services()
 
         if not utils.wait_for_idle_cpu(
@@ -207,7 +201,6 @@ class video_HangoutHardwarePerf(chrome_binary_test.ChromeBinaryTest):
             self.get_chrome_binary_path(VDA_BINARY),
             '--gtest_filter=DecodeVariations/*/0',
             '--test_video_data=%s' % ';'.join(test_video_data),
-            '--rendering_warm_up=%d' % RENDERING_WARM_UP,
             '--rendering_fps=%f' % RENDERING_FPS,
             '--num_play_throughs=%d' % MAX_INT,
             helper_logger.chrome_vmodule_flag(),
@@ -237,6 +230,8 @@ class video_HangoutHardwarePerf(chrome_binary_test.ChromeBinaryTest):
             helper_logger.chrome_vmodule_flag(),
         ]
         cmd_line.append('--ozone-platform=gbm')
+        if encoder_utils.has_broken_flush():
+            cmd_line.append('--disable_flush')
         return cmd_line
 
     def run_in_parallel(self, *commands):
@@ -266,7 +261,12 @@ class video_HangoutHardwarePerf(chrome_binary_test.ChromeBinaryTest):
 
     @helper_logger.video_log_wrapper
     @chrome_binary_test.nuke_chrome
-    def run_once(self, resources, decode_videos, encode_videos, measurement):
+    def run_once(self, resources, decode_videos, encode_videos, measurement,
+                 capabilities):
+        dc = device_capability.DeviceCapability()
+        for cap in capabilities:
+            dc.ensure_capability(cap)
+
         self._downloads = DownloadManager(tmpdir = self.tmpdir)
         try:
             self._downloads.download_all(resources)

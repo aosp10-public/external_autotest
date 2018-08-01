@@ -9,6 +9,7 @@ import contextlib
 from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error, enum
 from autotest_lib.client.cros import kernel_trace
+from autotest_lib.client.cros.power import power_utils
 
 BatteryDataReportType = enum.Enum('CHARGE', 'ENERGY')
 
@@ -37,12 +38,14 @@ class DevStat(object):
 
 
     def read_val(self,  file_name, field_type):
+        """Read a value from file.
+        """
         try:
             path = file_name
             if not file_name.startswith('/'):
                 path = os.path.join(self.path, file_name)
             f = open(path, 'r')
-            out = f.readline()
+            out = f.readline().rstrip('\n')
             val = field_type(out)
             return val
 
@@ -51,11 +54,19 @@ class DevStat(object):
 
 
     def read_all_vals(self):
+        """Read all values.
+        """
         for field, prop in self.fields.iteritems():
             if prop[0]:
                 val = self.read_val(prop[0], prop[1])
                 setattr(self, field, val)
 
+    def update(self):
+        """Update the DevStat.
+
+        Need to implement in subclass.
+        """
+        pass
 
 class ThermalStatACPI(DevStat):
     """
@@ -183,10 +194,10 @@ class ThermalStat(object):
         for thermal_glob_path, thermal_type in thermal_stat_types:
             try:
                 thermal_path = glob.glob(thermal_glob_path)[0]
-                logging.debug('Using %s for thermal info.' % thermal_path)
+                logging.debug('Using %s for thermal info.', thermal_path)
                 self._thermals.append(thermal_type(thermal_path))
             except:
-                logging.debug('Could not find thermal path %s, skipping.' %
+                logging.debug('Could not find thermal path %s, skipping.',
                               thermal_glob_path)
 
 
@@ -246,6 +257,7 @@ class BatteryStat(DevStat):
         'energy_full':          ['energy_full', float],
         'energy_full_design':   ['energy_full_design', float],
         'power_now':            ['power_now', float],
+        'present':              ['present', int],
         'energy_rate':          ['', ''],
         'remaining_time':       ['', '']
         }
@@ -344,7 +356,7 @@ class BatteryStat(DevStat):
             self.remaining_time =  self.energy / self.energy_rate
 
 
-class LineStatDummy(object):
+class LineStatDummy(DevStat):
     """
     Dummy line stat for devices which don't provide power_supply related sysfs
     interface.
@@ -366,7 +378,8 @@ class LineStat(DevStat):
     """
 
     linepower_fields = {
-        'is_online':             ['online', int]
+        'is_online':             ['online', int],
+        'status':                ['status', str]
         }
 
 
@@ -457,13 +470,40 @@ class SysStat(object):
             on_ac &= (not self.battery_discharging())
         return on_ac
 
+
+    def ac_charging(self):
+        """
+        Returns true if device is currently charging from AC power.
+        """
+        charging = False
+        for linepower in self.linepower:
+            charging |= (linepower.status == 'Charging')
+        return charging
+
+
     def battery_discharging(self):
         """
-        Returns true if battery is currently discharging.
+        Returns true if battery is currently discharging or false otherwise.
         """
+        if not self.battery_path:
+            logging.warn('Unable to determine battery discharge status')
+            return False
+
         return(self.battery[0].status.rstrip() == 'Discharging')
 
+
+    def battery_discharge_ok_on_ac(self):
+        """Returns True if battery is ok to discharge on AC presently.
+
+        some devices cycle between charge & discharge above a certain
+        SoC.  If AC is charging and SoC > 95% we can safely assume that.
+        """
+        return self.ac_charging() and (self.percent_current_charge() > 95)
+
+
     def percent_current_charge(self):
+        """Returns current charge compare to design capacity in percent.
+        """
         return self.battery[0].charge_now * 100 / \
                self.battery[0].charge_full_design
 
@@ -520,7 +560,7 @@ class AbstractStats(object):
         """
         total = sum(stats.itervalues())
         if total == 0:
-            return {}
+            return {k: 0 for k in stats}
         return dict((k, v * 100.0 / total) for (k, v) in stats.iteritems())
 
 
@@ -623,15 +663,20 @@ class CPUFreqStats(AbstractStats):
     """
     CPU Frequency statistics
     """
+    MSR_PLATFORM_INFO = 0xce
+    MSR_IA32_MPERF = 0xe7
+    MSR_IA32_APERF = 0xe8
 
     def __init__(self, start_cpu=-1, end_cpu=-1):
         cpufreq_stats_path = '/sys/devices/system/cpu/cpu*/cpufreq/stats/' + \
                              'time_in_state'
-        intel_pstate_stats_path = '/sys/devices/system/cpu/intel_pstate/' + \
-                             'aperf_mperf'
+        cpufreq_key_path = '/sys/devices/system/cpu/cpu*/cpufreq/' + \
+                           'scaling_available_frequencies'
+        intel_pstate_msr_path = '/dev/cpu/*/msr'
         self._file_paths = glob.glob(cpufreq_stats_path)
+        cpufreq_key_paths = glob.glob(cpufreq_key_path)
         num_cpus = len(self._file_paths)
-        self._intel_pstate_file_paths = glob.glob(intel_pstate_stats_path)
+        intel_pstate_msr_paths = glob.glob(intel_pstate_msr_path)
         self._running_intel_pstate = False
         self._initial_perf = None
         self._current_perf = None
@@ -639,14 +684,22 @@ class CPUFreqStats(AbstractStats):
         name = 'cpufreq'
         if not self._file_paths:
             logging.debug('time_in_state file not found')
-            if self._intel_pstate_file_paths:
-                logging.debug('intel_pstate frequency stats file found')
+            if intel_pstate_msr_paths:
+                logging.debug('intel_pstate msr file found')
+                self._num_cpus = len(intel_pstate_msr_paths)
                 self._running_intel_pstate = True
         else:
             if (start_cpu >= 0 and end_cpu >= 0
                     and not (start_cpu == 0 and end_cpu == num_cpus - 1)):
                 self._file_paths = self._file_paths[start_cpu : end_cpu]
+                cpufreq_key_paths = cpufreq_key_paths[start_cpu : end_cpu]
                 name += '_' + str(start_cpu) + '_' + str(end_cpu)
+
+        self._available_freqs = set()
+        for path in cpufreq_key_paths:
+            if os.path.exists(path):
+                self._available_freqs |= \
+                        set(int(x) for x in utils.read_file(path).split())
 
         super(CPUFreqStats, self).__init__(name=name)
 
@@ -656,27 +709,26 @@ class CPUFreqStats(AbstractStats):
             aperf = 0
             mperf = 0
 
-            for path in self._intel_pstate_file_paths:
-                if not os.path.exists(path):
-                    logging.debug('%s is not found', path)
-                    continue
-                data = utils.read_file(path)
-                for line in data.splitlines():
-                    pair = line.split()
-                    # max_freq is supposed to be the same for all CPUs
-                    # and remain constant throughout.
-                    # So, we set the entry only once
-                    if not self._max_freq:
-                        self._max_freq = int(pair[0])
-                    aperf += int(pair[1])
-                    mperf += int(pair[2])
+            for cpu in range(self._num_cpus):
+                aperf += utils.rdmsr(self.MSR_IA32_APERF, cpu)
+                mperf += utils.rdmsr(self.MSR_IA32_MPERF, cpu)
+
+            # max_freq is supposed to be the same for all CPUs and remain
+            # constant throughout. So, we set the entry only once.
+            # Note that this is max non-turbo frequency, some CPU can run at
+            # higher turbo frequency in some condition.
+            if not self._max_freq:
+                platform_info = utils.rdmsr(self.MSR_PLATFORM_INFO)
+                mul = platform_info >> 8 & 0xff
+                bclk = utils.get_intel_bclk_khz()
+                self._max_freq = mul * bclk
 
             if not self._initial_perf:
                 self._initial_perf = (aperf, mperf)
 
             self._current_perf = (aperf, mperf)
 
-        stats = {}
+        stats = dict((k, 0) for k in self._available_freqs)
         for path in self._file_paths:
             if not os.path.exists(path):
                 logging.debug('%s is not found', path)
@@ -1163,21 +1215,25 @@ def get_cpu_sibling_groups():
     return sibling_groups
 
 
+def get_avaliable_cpu_stats():
+    """Return CPUFreq/CPUIdleStats groups by big-small siblings groups."""
+    ret = [CPUPackageStats()]
+    cpu_sibling_groups = get_cpu_sibling_groups()
+    if not cpu_sibling_groups:
+        ret.append(CPUFreqStats())
+        ret.append(CPUIdleStats())
+    for cpu_start, cpu_end in cpu_sibling_groups:
+        ret.append(CPUFreqStats(cpu_start, cpu_end))
+        ret.append(CPUIdleStats(cpu_start, cpu_end))
+    return ret
+
 
 class StatoMatic(object):
     """Class to aggregate and monitor a bunch of power related statistics."""
     def __init__(self):
         self._start_uptime_secs = kernel_trace.KernelTrace.uptime_secs()
-        self._astats = [USBSuspendStats(),
-                        GPUFreqStats(incremental=False),
-                        CPUPackageStats()]
-        cpu_sibling_groups = get_cpu_sibling_groups()
-        if not len(cpu_sibling_groups):
-            self._astats.append(CPUFreqStats())
-            self._astats.append(CPUIdleStats())
-        for cpu_start, cpu_end in cpu_sibling_groups:
-            self._astats.append(CPUFreqStats(cpu_start, cpu_end))
-            self._astats.append(CPUIdleStats(cpu_start, cpu_end))
+        self._astats = [USBSuspendStats(), GPUFreqStats(incremental=False)]
+        self._astats.extend(get_avaliable_cpu_stats())
         if os.path.isdir(DevFreqStats._DIR):
             self._astats.extend([DevFreqStats(f) for f in \
                                  os.listdir(DevFreqStats._DIR)])
@@ -1355,7 +1411,8 @@ class MeasurementLogger(threading.Thread):
         domains: list of  domain strings being measured
 
     Public methods:
-        run: launches the thread to gather measuremnts
+        run: launches the thread to gather measurements
+        refresh: perform data samplings for every measurements
         calc: calculates
         save_results:
 
@@ -1394,19 +1451,26 @@ class MeasurementLogger(threading.Thread):
 
         self.done = False
 
+    def refresh(self):
+        """Perform data samplings for every measurements.
+
+        Returns:
+            list of sampled data for every measurements.
+        """
+        readings = []
+        for meas in self._measurements:
+            readings.append(meas.refresh())
+        return readings
 
     def run(self):
         """Threads run method."""
         loop = 0
         start_time = time.time()
         while(not self.done):
-            readings = []
-            for meas in self._measurements:
-                readings.append(meas.refresh())
             # TODO (dbasehore): We probably need proper locking in this file
             # since there have been race conditions with modifying and accessing
             # data.
-            self.readings.append(readings)
+            self.readings.append(self.refresh())
             current_time = time.time()
             self.times.append(current_time)
             loop += 1
@@ -1493,9 +1557,9 @@ class MeasurementLogger(threading.Thread):
                     meas_array = meas[numpy.bitwise_and(tstart < t, t < tend)]
                 except ValueError, e:
                     logging.debug('Error logging measurements: %s', str(e))
-                    logging.debug('timestamps %d %s' % (t.len, t))
-                    logging.debug('timestamp start, end %f %f' % (tstart, tend))
-                    logging.debug('measurements %d %s' % (meas.len, meas))
+                    logging.debug('timestamps %d %s', t.len, t)
+                    logging.debug('timestamp start, end %f %f', tstart, tend)
+                    logging.debug('measurements %d %s', meas.len, meas)
 
                 # If sub-test terminated early, avoid calculating avg, std and
                 # min
@@ -1536,7 +1600,69 @@ class MeasurementLogger(threading.Thread):
                 f.write(line + '\n')
 
 
+class CPUStatsLogger(MeasurementLogger):
+    """Class to measure CPU Frequency and CPU Idle Stats.
+
+    CPUStatsLogger derived from MeasurementLogger class but overload data
+    samplings method because MeasurementLogger assumed that each sampling is
+    independent to each other. However, in this case it is not. For example,
+    CPU time spent in C0 state is measure by time not spent in all other states.
+
+    CPUStatsLogger also collects the weight average in each time period if the
+    underlying AbstractStats support weight average function.
+
+    Private attributes:
+       _stats: list of CPU AbstractStats objects to be sampled.
+       _refresh_count: number of times refresh() has been called.
+       _last_wavg: dict of wavg when refresh() was last called.
+    """
+    def __init__(self, seconds_period=1.0):
+        """Initialize a CPUStatsLogger.
+
+        Args:
+            seconds_period: float, probing interval in seconds.  Default 1.0
+        """
+        # We don't use measurements since CPU stats can't measure separately.
+        super(CPUStatsLogger, self).__init__([], seconds_period)
+
+        self._stats = get_avaliable_cpu_stats()
+        self.domains = []
+        for stat in self._stats:
+            self.domains.extend([stat.name + '_' + str(state_name)
+                                 for state_name in stat.refresh()])
+            if stat.weighted_average():
+                self.domains.append('wavg_' + stat.name)
+        self._refresh_count = 0
+        self._last_wavg = collections.defaultdict(int)
+
+    def refresh(self):
+        self._refresh_count += 1
+        count = self._refresh_count
+        ret = []
+        for stat in self._stats:
+            ret.extend(stat.refresh().values())
+            wavg = stat.weighted_average()
+            if wavg:
+                last_wavg = self._last_wavg[stat.name]
+                self._last_wavg[stat.name] = wavg
+
+                # Calculate weight average in this period using current total
+                # weight average and last total weight average.
+                # The result will lose some precision with higher number of
+                # count but still good enough for 11 significant digits even if
+                # we logged the data every 1 second for a day.
+                ret.append(wavg * count - last_wavg * (count - 1))
+        return ret
+
+    def save_results(self, resultsdir, fname=None):
+        if not fname:
+            fname = 'cpu_results_%.0f.txt' % time.time()
+        super(CPUStatsLogger, self).save_results(resultsdir, fname)
+
+
 class PowerLogger(MeasurementLogger):
+    """Class to measure power consumption.
+    """
     def save_results(self, resultsdir, fname=None):
         if not fname:
             fname = 'power_results_%.0f.txt' % time.time()
@@ -1576,6 +1702,40 @@ class TempMeasurement(object):
         return int(utils.read_one_line(self._path)) / 1000.
 
 
+class BatteryTempMeasurement(TempMeasurement):
+    """Class to measure battery temperature."""
+    def __init__(self):
+        super(BatteryTempMeasurement, self).__init__('battery', 'battery_temp')
+
+
+    def refresh(self):
+        """Perform battery temperature reading.
+
+        Returns:
+            float, temperature in degrees Celsius.
+        """
+        result = utils.run(self._path, timeout=5, ignore_status=True)
+        return float(result.stdout)
+
+
+def has_battery_temp():
+    """Determine if DUT can provide battery temperature.
+
+    Returns:
+        Boolean, True if battery temperature available.  False otherwise.
+    """
+    if not power_utils.has_battery():
+        return False
+
+    btemp = BatteryTempMeasurement()
+    try:
+        btemp.refresh()
+    except ValueError:
+        return False
+
+    return True
+
+
 class TempLogger(MeasurementLogger):
     """A thread that logs temperature readings in millidegrees Celsius."""
     def __init__(self, measurements, seconds_period=30.0):
@@ -1590,6 +1750,9 @@ class TempLogger(MeasurementLogger):
                 fpath = tstats.fields[kname][0]
                 new_meas = TempMeasurement(domain, fpath)
                 measurements.append(new_meas)
+
+            if has_battery_temp():
+                measurements.append(BatteryTempMeasurement())
         super(TempLogger, self).__init__(measurements, seconds_period)
 
 
@@ -1798,3 +1961,264 @@ class S0ixResidencyStats(object):
         @returns S0ix Residency since the class has been initialized.
         """
         return parse_pmc_s0ix_residency_info() - self._initial_residency
+
+
+class DMCFirmwareStats(object):
+    """
+    Collect DMC firmware stats of Intel based system (SKL+), (APL+).
+    """
+    # Intel CPUs only transition to DC6 from DC5. https://git.io/vppcG
+    DC6_ENTRY_KEY = 'DC5 -> DC6 count'
+
+    def __init__(self):
+        self._initial_stat = DMCFirmwareStats._parse_dmc_info()
+
+    def check_fw_loaded(self):
+        """Check that DMC firmware is loaded
+
+        @returns boolean of DMC firmware loaded.
+        """
+        return self._initial_stat['fw loaded']
+
+    def is_dc6_supported(self):
+        """Check that DMC support DC6 state."""
+        return self.DC6_ENTRY_KEY in self._initial_stat
+
+    def get_accumulated_dc6_entry(self):
+        """Check number of DC6 state entry since the class has been initialized.
+
+        @returns number of DC6 state entry.
+        """
+        if not self.is_dc6_supported():
+            return 0
+
+        key = self.DC6_ENTRY_KEY
+        current_stat = DMCFirmwareStats._parse_dmc_info()
+        return current_stat[key] - self._initial_stat[key]
+
+    @staticmethod
+    def _parse_dmc_info():
+        """
+        Parses DMC firmware info for Intel based systems.
+
+        @returns dictionary of dmc_fw info
+        @raises error.TestFail if the debugfs file not found.
+        """
+        path = '/sys/kernel/debug/dri/0/i915_dmc_info'
+        if not os.path.exists(path):
+            raise error.TestFail('DMC info file not found.')
+
+        with open(path, 'r') as f:
+            lines = [line.strip() for line in f.readlines()]
+
+        # For pre 4.16 kernel. https://git.io/vhThb
+        if lines[0] == 'not supported':
+            raise error.TestFail('DMC not supported.')
+
+        ret = dict()
+        for line in lines:
+            key, val = line.rsplit(': ', 1)
+
+            if key == 'fw loaded':
+                val = val == 'yes'
+            elif re.match(r'DC\d -> DC\d count', key):
+                val = int(val)
+            ret[key] = val
+        return ret
+
+
+class RC6ResidencyStats(object):
+    """
+    Collect RC6 residency stats of Intel based system.
+    """
+    def __init__(self):
+        self._rc6_enable_checked = False
+        self._initial_stat = self._parse_rc6_residency_info()
+
+    def get_accumulated_residency_secs(self):
+        """Check number of RC6 state entry since the class has been initialized.
+
+        @returns int of RC6 residency in seconds since instantiation.
+        """
+        current_stat = self._parse_rc6_residency_info()
+        return (current_stat - self._initial_stat) * 1e-3
+
+    def _is_rc6_enable(self):
+        """
+        Verified that RC6 is enable.
+
+        @returns Boolean of RC6 enable status.
+        @raises error.TestFail if the sysfs file not found.
+        """
+        path = '/sys/class/drm/card0/power/rc6_enable'
+        if not os.path.exists(path):
+            raise error.TestFail('RC6 enable file not found.')
+
+        return int(utils.read_one_line(path)) == 1
+
+    def _parse_rc6_residency_info(self):
+        """
+        Parses RC6 residency info for Intel based systems.
+
+        @returns int of RC6 residency in millisec since boot.
+        @raises error.TestFail if the sysfs file not found or RC6 not enabled.
+        """
+        if not self._rc6_enable_checked:
+            if not self._is_rc6_enable():
+                raise error.TestFail('RC6 is not enabled.')
+            self._rc6_enable_checked = True
+
+        path = '/sys/class/drm/card0/power/rc6_residency_ms'
+        if not os.path.exists(path):
+            raise error.TestFail('RC6 residency file not found.')
+
+        return int(utils.read_one_line(path))
+
+
+class PCHPowergatingStats(object):
+    """
+    Collect PCH powergating status of intel based system.
+    """
+    PMC_CORE_PATH = '/sys/kernel/debug/pmc_core/pch_ip_power_gating_status'
+    TELEMETRY_PATH = '/sys/kernel/debug/telemetry/soc_states'
+
+    def __init__(self):
+        self._stat = {}
+
+    def check_s0ix_requirement(self):
+        """
+        Check PCH powergating status with S0ix requirement.
+
+        @returns list of PCH IP block name that need to be powergated for low
+                 power consumption S0ix, empty list if none.
+        """
+        # PCH IP block that is on for S0ix. Ignore these IP block.
+        S0IX_WHITELIST = set([
+                'PMC', 'OPI-DMI', 'SPI / eSPI', 'XHCI', 'xHCI', 'FUSE', 'PCIE0',
+                'NPKVRC', 'NPKVNN'])
+
+        # PCH IP block that is on/off for S0ix depend on features enabled.
+        # Add log when these IPs state are on.
+        S0IX_WARNLIST = set([
+                'HDA-PGD0', 'HDA-PGD2', 'HDA-PGD3', 'LPSS', 'AVSPGD1',
+                'AVSPGD4'])
+
+        on_ip = set(ip['name'] for ip in self._stat if ip['state'])
+        on_ip -= S0IX_WHITELIST
+
+        if on_ip:
+            on_ip_in_warn_list = on_ip & S0IX_WARNLIST
+            if on_ip_in_warn_list:
+                logging.warn('Found PCH IP that may be able to powergate: %s',
+                             ', '.join(on_ip_in_warn_list))
+            on_ip -= S0IX_WARNLIST
+
+        if on_ip:
+            logging.error('Found PCH IP that need to powergate: %s',
+                          ', '.join(on_ip))
+            return False
+        return True
+
+    def read_pch_powergating_info(self, sleep_seconds=1):
+        """
+        Read PCH powergating status info for Intel based systems.
+
+        Intel currently shows powergating status in 2 different place in debugfs
+        depend on which CPU platform.
+
+        @param sleep_seconds: sleep time to make DUT idle before read the data.
+
+        @raises error.TestFail if the debugfs file not found or parsing error.
+        """
+        if os.path.exists(self.PMC_CORE_PATH):
+            logging.info('Use PCH powergating info at %s', self.PMC_CORE_PATH)
+            time.sleep(sleep_seconds)
+            self._read_pcm_core_powergating_info()
+            return
+
+        if os.path.exists(self.TELEMETRY_PATH):
+            logging.info('Use PCH powergating info at %s', self.TELEMETRY_PATH)
+            time.sleep(sleep_seconds)
+            self._read_telemetry_powergating_info()
+            return
+
+        raise error.TestFail('PCH powergating info file not found.')
+
+    def _read_pcm_core_powergating_info(self):
+        """
+        read_pch_powergating_info() for Intel Core KBL+
+
+        @raises error.TestFail if parsing error.
+        """
+        with open(self.PMC_CORE_PATH, 'r') as f:
+            lines = [line.strip() for line in f.readlines()]
+
+        # Example pattern to match:
+        # PCH IP: 0  - PMC                                State: On
+        # PCH IP: 1  - SATA                               State: Off
+        pattern = r'PCH IP:\s+(?P<id>\d+)\s+' \
+                  r'- (?P<name>.*\w)\s+'      \
+                  r'State: (?P<state>Off|On)'
+        matcher = re.compile(pattern)
+        ret = []
+        for i, line in enumerate(lines):
+            match = matcher.match(line)
+            if not match:
+                raise error.TestFail('Can not parse PCH powergating info: ',
+                                     line)
+
+            index = int(match.group('id'))
+            if i != index:
+                raise error.TestFail('Wrong index for PCH powergating info: ',
+                                     line)
+
+            name = match.group('name')
+            state = match.group('state') == 'On'
+
+            ret.append({'name': name, 'state': state})
+        self._stat = ret
+
+    def _read_telemetry_powergating_info(self):
+        """
+        read_pch_powergating_info() for Intel Atom APL+
+
+        @raises error.TestFail if parsing error.
+        """
+        with open(self.TELEMETRY_PATH, 'r') as f:
+            raw_str = f.read()
+
+        # Example pattern to match:
+        # --------------------------------------
+        # South Complex PowerGate Status
+        # --------------------------------------
+        # Device           PG
+        # LPSS             1
+        # SPI              1
+        # FUSE             0
+        #
+        # ---------------------------------------
+        trimed_pattern = r'.*South Complex PowerGate Status\n'    \
+                         r'-+\n'                                  \
+                         r'Device\s+PG\n'                         \
+                         r'(?P<trimmed_section>(\w+\s+[0|1]\n)+)' \
+                         r'\n-+\n.*'
+        trimed_match = re.match(trimed_pattern, raw_str, re.DOTALL)
+        if not trimed_match:
+            raise error.TestFail('Can not parse PCH powergating info: ',
+                                 raw_str)
+        trimmed_str = trimed_match.group('trimmed_section').strip()
+        lines = [line.strip() for line in trimmed_str.split('\n')]
+
+        matcher = re.compile(r'(?P<name>\w+)\s+(?P<state>[0|1])')
+        ret = []
+        for line in lines:
+            match = matcher.match(line)
+            if not match:
+                raise error.TestFail('Can not parse PCH powergating info: %s',
+                                     line)
+
+            name = match.group('name')
+            state = match.group('state') == '0' # 0 means on and 1 means off
+
+            ret.append({'name': name, 'state': state})
+        self._stat = ret

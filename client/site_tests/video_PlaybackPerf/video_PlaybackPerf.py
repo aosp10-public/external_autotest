@@ -32,11 +32,6 @@ MEASUREMENT_DURATION = 30
 # Time to exclude from calculation after playing a video [seconds].
 STABILIZATION_DURATION = 10
 
-# List of thermal throttling services that should be disabled.
-# - temp_metrics for link.
-# - thermal for daisy, snow, pit etc.
-THERMAL_SERVICES = ['temp_metrics', 'thermal']
-
 # Time in seconds to wait for cpu idle until giveup.
 WAIT_FOR_IDLE_CPU_TIMEOUT = 60.0
 # Maximum percent of cpu usage considered as idle.
@@ -58,7 +53,6 @@ class video_PlaybackPerf(test.test):
     consumption for video playback to performance dashboard.
     """
     version = 1
-    arc_mode = None
 
 
     def initialize(self):
@@ -84,8 +78,7 @@ class video_PlaybackPerf(test.test):
 
 
     @helper_logger.video_log_wrapper
-    def run_once(self, video_name, video_description, power_test=False,
-                 arc_mode=None):
+    def run_once(self, video_name, video_description, power_test=False):
         """
         Runs the video_PlaybackPerf test.
 
@@ -95,14 +88,12 @@ class video_PlaybackPerf(test.test):
         @param power_test: True if this is a power test and it would only run
                 the power test. If False, it would run the cpu usage test and
                 the dropped frame count test.
-        @param arc_mode: if 'enabled', run the test with Android enabled.
         """
         # Download test video.
         url = DOWNLOAD_BASE + video_name
         local_path = os.path.join(self.bindir, os.path.basename(video_name))
         logging.info("Downloading %s to %s", url, local_path);
         file_utils.download_file(url, local_path)
-        self.arc_mode = arc_mode
 
         if not power_test:
             # Run the video playback dropped frame tests.
@@ -202,7 +193,7 @@ class video_PlaybackPerf(test.test):
             logging.warning('Could not get cold machine pre login.')
 
         # Stop the thermal service that may change the cpu frequency.
-        self._service_stopper = service_stopper.ServiceStopper(THERMAL_SERVICES)
+        self._service_stopper = service_stopper.get_thermal_service_stopper()
         self._service_stopper.stop_services()
         # Set the scaling governor to performance mode to set the cpu to the
         # highest frequency available.
@@ -272,7 +263,6 @@ class video_PlaybackPerf(test.test):
 
         with chrome.Chrome(
                 extra_browser_args=helper_logger.chrome_vmodule_flag(),
-                arc_mode=self.arc_mode,
                 init_network_controller=True) as cr:
 
             # crbug/753292 - enforce the idle checks after login
@@ -300,7 +290,7 @@ class video_PlaybackPerf(test.test):
         # Start chrome with disabled video hardware decode flag.
         with chrome.Chrome(extra_browser_args=
                 DISABLE_ACCELERATED_VIDEO_DECODE_BROWSER_ARGS,
-                arc_mode=self.arc_mode, init_network_controller=True) as cr:
+                init_network_controller=True) as cr:
             # Open the video playback page and start playing.
             self.start_playback(cr, local_path)
             result = gather_result(cr)

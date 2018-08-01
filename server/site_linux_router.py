@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from autotest_lib.client.common_lib import error
+from autotest_lib.client.common_lib import utils
 from autotest_lib.client.common_lib.cros import path_utils
 from autotest_lib.client.common_lib.cros.network import interface
 from autotest_lib.client.common_lib.cros.network import netblock
@@ -207,6 +208,14 @@ class LinuxRouter(site_linux_system.LinuxSystem):
         self.dhcp_low = 1
         self.dhcp_high = 128
 
+        # Tear down hostapbr bridge interfaces
+        result = self.host.run('ls -d /sys/class/net/%s*' %
+                               self.HOSTAP_BRIDGE_INTERFACE_PREFIX,
+                               ignore_status=True)
+        if result.exit_status == 0:
+            for path in result.stdout.splitlines():
+                self.delete_link(path.split('/')[-1])
+
         # Kill hostapd and dhcp server if already running.
         self._kill_process_instance('hostapd', timeout_seconds=30)
         self.stop_dhcp_server(instance=None)
@@ -297,39 +306,48 @@ class LinuxRouter(site_linux_system.LinuxSystem):
 
         # Wait for confirmation that the router came up.
         logging.info('Waiting for hostapd to startup.')
-        start_time = time.time()
-        while time.time() - start_time < self.STARTUP_TIMEOUT_SECONDS:
-            success = self.router.run(
-                    'grep "Setup of interface done" %s' % log_file,
-                    ignore_status=True).exit_status == 0
-            if success:
-                break
-
-            # A common failure is an invalid router configuration.
-            # Detect this and exit early if we see it.
-            bad_config = self.router.run(
-                    'grep "Interface initialization failed" %s' % log_file,
-                    ignore_status=True).exit_status == 0
-            if bad_config:
-                raise error.TestFail('hostapd failed to initialize AP '
-                                     'interface.')
-
-            if pid:
-                early_exit = self.router.run('kill -0 %d' % pid,
-                                             ignore_status=True).exit_status
-                if early_exit:
-                    raise error.TestFail('hostapd process terminated.')
-
-            time.sleep(self.POLLING_INTERVAL_SECONDS)
-        else:
-            raise error.TestFail('Timed out while waiting for hostapd '
-                                 'to start.')
+        utils.poll_for_condition(
+                condition=lambda: self._has_hostapd_started(log_file, pid),
+                exception=error.TestFail('Timed out while waiting for hostapd '
+                                         'to start.'),
+                timeout=self.STARTUP_TIMEOUT_SECONDS,
+                sleep_interval=self.POLLING_INTERVAL_SECONDS)
 
         if configuration.frag_threshold:
             threshold = self.iw_runner.get_fragmentation_threshold(phy_name)
             if threshold != configuration.frag_threshold:
                 raise error.TestNAError('Router does not support setting '
                                         'fragmentation threshold')
+
+
+    def _has_hostapd_started(self, log_file, pid):
+        """Determines if hostapd has started.
+
+        @return Whether or not hostapd has started.
+        @raise error.TestFail if there was a bad config or hostapd terminated.
+        """
+        success = self.router.run(
+            'grep "Setup of interface done" %s' % log_file,
+            ignore_status=True).exit_status == 0
+        if success:
+            return True
+
+        # A common failure is an invalid router configuration.
+        # Detect this and exit early if we see it.
+        bad_config = self.router.run(
+            'grep "Interface initialization failed" %s' % log_file,
+            ignore_status=True).exit_status == 0
+        if bad_config:
+            raise error.TestFail('hostapd failed to initialize AP '
+                                 'interface.')
+
+        if pid:
+            early_exit = self.router.run('kill -0 %d' % pid,
+                                         ignore_status=True).exit_status
+            if early_exit:
+                raise error.TestFail('hostapd process terminated.')
+
+        return False
 
 
     def _kill_process_instance(self,
@@ -359,20 +377,25 @@ class LinuxRouter(site_linux_system.LinuxSystem):
             search_arg = process
 
         self.host.run('pkill %s' % search_arg, ignore_status=True)
-        is_dead = False
-        start_time = time.time()
-        while not is_dead and time.time() - start_time < timeout_seconds:
-            time.sleep(self.POLLING_INTERVAL_SECONDS)
-            is_dead = self.host.run(
-                    'pgrep -l %s' % search_arg,
-                    ignore_status=True).exit_status != 0
-        if is_dead or ignore_timeouts:
-            return is_dead
 
-        raise error.TestError(
+        # Wait for process to die
+        time.sleep(self.POLLING_INTERVAL_SECONDS)
+        try:
+            utils.poll_for_condition(
+                    condition=lambda: self.host.run(
+                            'pgrep -l %s' % search_arg,
+                            ignore_status=True).exit_status != 0,
+                    timeout=timeout_seconds,
+                    sleep_interval=self.POLLING_INTERVAL_SECONDS)
+        except utils.TimeoutError:
+            if ignore_timeouts:
+                return False
+
+            raise error.TestError(
                 'Timed out waiting for %s%s to die' %
                 (process,
                 '' if instance is None else ' (instance=%s)' % instance))
+        return True
 
 
     def kill_hostapd_instance(self, instance):
@@ -446,11 +469,14 @@ class LinuxRouter(site_linux_system.LinuxSystem):
             if site_linux_system.LinuxSystem.CAPABILITY_VHT not in router_caps:
                 raise error.TestNAError('Router does not have AC support')
 
+        if configuration.use_bridge:
+            configuration._bridge = self.get_brif()
+
         self.start_hostapd(configuration)
         interface = self.hostapd_instances[-1].interface
         self.iw_runner.set_tx_power(interface, 'auto')
         self.set_beacon_footer(interface, configuration.beacon_footer)
-        self.start_local_server(interface)
+        self.start_local_server(interface, bridge=configuration.bridge)
         logging.info('AP configured.')
 
 
@@ -504,6 +530,15 @@ class LinuxRouter(site_linux_system.LinuxSystem):
         """
         return '%d.%d.%d.%d' % (self.SUBNET_PREFIX_OCTETS + (index, 253))
 
+    def local_bridge_address(self, index):
+        """Get the bridge address for an interface.
+
+        This address is assigned to a local bridge device.
+
+        @param index int describing which local server this is for.
+
+        """
+        return '%d.%d.%d.%d' % (self.SUBNET_PREFIX_OCTETS + (index, 252))
 
     def local_peer_mac_address(self):
         """Get the MAC address of the peer interface.
@@ -550,12 +585,14 @@ class LinuxRouter(site_linux_system.LinuxSystem):
     def start_local_server(self,
                            interface,
                            ap_num=None,
-                           server_address_index=None):
+                           server_address_index=None,
+                           bridge=None):
         """Start a local server on an interface.
 
         @param interface string (e.g. wlan0)
         @param ap_num int the ap instance to start the server for
         @param server_address_index int server address index
+        @param bridge string (e.g. br0)
 
         """
         logging.info('Starting up local server...')
@@ -582,6 +619,7 @@ class LinuxRouter(site_linux_system.LinuxSystem):
             (server_addr.get_addr_in_block(1),
              server_addr.get_addr_in_block(128)))
         params['interface'] = interface
+        params['bridge'] = bridge
         params['ip_params'] = ('%s broadcast %s dev %s' %
                                (server_addr.netblock,
                                 server_addr.broadcast,
@@ -598,6 +636,12 @@ class LinuxRouter(site_linux_system.LinuxSystem):
                         (self.cmd_ip, params['ip_params']))
         self.router.run('%s link set %s up' %
                         (self.cmd_ip, interface))
+        if params['bridge']:
+            bridge_addr = netblock.from_addr(
+                    self.local_bridge_address(server_address_index),
+                    prefix_len=24)
+            self.router.run("ifconfig %s %s" %
+                           (params['bridge'], bridge_addr.netblock))
         self.start_dhcp_server(interface)
 
 
@@ -636,7 +680,7 @@ class LinuxRouter(site_linux_system.LinuxSystem):
             'log-dhcp',
             'dhcp-range=%s' % ','.join((server_addr.get_addr_in_block(1),
                                         server_addr.get_addr_in_block(128))),
-            'interface=%s' % params['interface'],
+            'interface=%s' % (params['bridge'] or params['interface']),
             'dhcp-leasefile=%s' % self.dhcpd_leases])
         self.router.run('cat <<EOF >%s\n%s\nEOF\n' %
             (dhcpd_conf_file, dhcp_conf))
@@ -803,6 +847,20 @@ class LinuxRouter(site_linux_system.LinuxSystem):
         for server in local_servers:
             self.stop_local_server(server)
 
+        for brif in range(self._brif_index):
+            self.delete_link('%s%d' %
+                             (self.HOSTAP_BRIDGE_INTERFACE_PREFIX, brif))
+
+
+    def delete_link(self, name):
+        """Delete link using the `ip` command.
+
+        @param name string link name.
+
+        """
+        self.host.run('%s link del %s' % (self.cmd_ip, name),
+                      ignore_status=True)
+
 
     def set_ap_interface_down(self, instance=0):
         """Bring down the hostapd interface.
@@ -856,6 +914,23 @@ class LinuxRouter(site_linux_system.LinuxSystem):
         self.router.run('%s -p%s deauthenticate %s' %
                         (self.cmd_hostapd_cli, control_if, client_mac))
 
+    def send_bss_tm_req(self, client_mac, neighbor_list):
+        """Send a BSS Transition Management Request to a client.
+
+        @param client_mac string containing the mac address of the client.
+        @param neighbor_list list of strings containing mac addresses of
+               candidate APs.
+        @return bool True if BSS_TM_REQ is sent successfully.
+
+        """
+        control_if = self.hostapd_instances[0].config_dict['ctrl_interface']
+        command = ('%s -p%s BSS_TM_REQ %s neighbor=%s,0,0,0,0 pref=1' %
+                   (self.cmd_hostapd_cli, control_if, client_mac,
+                    ',0,0,0,0 neighbor='.join(neighbor_list)))
+        ret = self.router.run(command).stdout
+        if ret.splitlines()[-1] != 'OK':
+            return False
+        return True
 
     def _prep_probe_response_footer(self, footer):
         """Write probe response footer temporarily to a local file and copy

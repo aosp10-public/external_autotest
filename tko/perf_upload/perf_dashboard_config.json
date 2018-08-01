@@ -93,6 +93,10 @@
     "master_name": "ChromeOSPower"
   },
   {
+    "autotest_name": "graphics_Chrome",
+    "master_name": "ChromeOS_Graphics"
+  },
+  {
     "autotest_name": "graphics_dEQP.bvt",
     "master_name": "ChromeOS_Graphics",
     "dashboard_test_name": "graphics_dEQP"
@@ -104,6 +108,16 @@
   },
   {
     "autotest_name": "graphics_dEQP.gles3-master",
+    "master_name": "ChromeOS_Graphics",
+    "dashboard_test_name": "graphics_dEQP"
+  },
+  {
+    "autotest_name": "graphics_dEQP.gles31-master",
+    "master_name": "ChromeOS_Graphics",
+    "dashboard_test_name": "graphics_dEQP"
+  },
+  {
+    "autotest_name": "graphics_dEQP.gles32-master",
     "master_name": "ChromeOS_Graphics",
     "dashboard_test_name": "graphics_dEQP"
   },
@@ -169,6 +183,10 @@
     "master_name": "ChromeOS_Graphics"
   },
   {
+    "autotest_name": "graphics_VideoRenderingPower",
+    "master_name": "ChromeOS_Graphics"
+  },
+  {
     "autotest_name": "graphics_WebGLAquarium",
     "master_name": "ChromeOS_Graphics"
   },
@@ -217,6 +235,11 @@
     "master_name": "ChromeOS_Enterprise"
   },
   {
+    "autotest_name": "network_WiFi_AssocConfigPerformance",
+    "master_name": "ChromeOSWiFi",
+    "dashboard_test_name": "network_WiFi_AssocConfig"
+  },
+  {
     "autotest_name": "network_WiFi_AttenuatedPerf.ht40_ch001",
     "master_name": "ChromeOSWiFi",
     "dashboard_test_name": "network_WiFi_AttenuatedPerf"
@@ -250,36 +273,6 @@
     "autotest_name": "network_WiFi_BluetoothStreamPerf.11b",
     "master_name": "ChromeOSWiFi",
     "dashboard_test_name": "network_WiFi_BluetoothStreamPerf"
-  },
-  {
-    "autotest_name": "network_WiFi_Perf.11a",
-    "master_name": "ChromeOSWiFi",
-    "dashboard_test_name": "network_WiFi_Perf"
-  },
-  {
-    "autotest_name": "network_WiFi_Perf.11a_aes",
-    "master_name": "ChromeOSWiFi",
-    "dashboard_test_name": "network_WiFi_Perf"
-  },
-  {
-    "autotest_name": "network_WiFi_Perf.11a_tkip",
-    "master_name": "ChromeOSWiFi",
-    "dashboard_test_name": "network_WiFi_Perf"
-  },
-  {
-    "autotest_name": "network_WiFi_Perf.11a_wep",
-    "master_name": "ChromeOSWiFi",
-    "dashboard_test_name": "network_WiFi_Perf"
-  },
-  {
-    "autotest_name": "network_WiFi_Perf.11b",
-    "master_name": "ChromeOSWiFi",
-    "dashboard_test_name": "network_WiFi_Perf"
-  },
-  {
-    "autotest_name": "network_WiFi_Perf.11b_wep",
-    "master_name": "ChromeOSWiFi",
-    "dashboard_test_name": "network_WiFi_Perf"
   },
   {
     "autotest_name": "network_WiFi_Perf.11g",
@@ -322,6 +315,11 @@
     "dashboard_test_name": "network_WiFi_Perf"
   },
   {
+    "autotest_name": "network_WiFi_Perf.vht80",
+    "master_name": "ChromeOSWiFi",
+    "dashboard_test_name": "network_WiFi_Perf"
+  },
+  {
     "autotest_name": "network_WiFi_PTK",
     "master_name": "ChromeOSWiFi"
   },
@@ -352,6 +350,16 @@
   },
   {
     "autotest_name": "network_WiFi_SimpleConnect.wifi_check5HT40",
+    "master_name": "ChromeOSWiFi",
+    "dashboard_test_name": "network_WiFi_SimpleConnect"
+  },
+  {
+    "autotest_name": "network_WiFi_SimpleConnect.wifi_check5VHT80_pure",
+    "master_name": "ChromeOSWiFi",
+    "dashboard_test_name": "network_WiFi_SimpleConnect"
+  },
+  {
+    "autotest_name": "network_WiFi_SimpleConnect.wifi_check5VHT80_mixed",
     "master_name": "ChromeOSWiFi",
     "dashboard_test_name": "network_WiFi_SimpleConnect"
   },
@@ -530,6 +538,10 @@
     "master_name": "ChromeOSPower"
   },
   {
+    "autotest_name": "power_Idle",
+    "master_name": "ChromeOSPower"
+  },
+  {
     "autotest_name": "power_LoadTest.WIFI_1hr",
     "master_name": "ChromeOSPower"
   },
@@ -685,11 +697,27 @@
     "master_name": "ChromeOSVideo"
   },
   {
+    "autotest_name": "video_JDAPerf.cpu",
+    "master_name": "ChromeOSVideo"
+  },
+  {
+    "autotest_name": "video_JDAPerf.power",
+    "master_name": "ChromeOSVideo"
+  },
+  {
     "autotest_name": "video_MediaRecorderPerf",
     "master_name": "ChromeOSVideo"
   },
   {
     "autotest_name": "video_PlaybackPerf",
+    "master_name": "ChromeOSVideo"
+  },
+  {
+    "autotest_name": "video_VDAPerf",
+    "master_name": "ChromeOSVideo"
+  },
+  {
+    "autotest_name": "video_VDAPerf.cfm",
     "master_name": "ChromeOSVideo"
   },
   {
@@ -702,6 +730,10 @@
   },
   {
     "autotest_name": "video_VDAPerf.vp9",
+    "master_name": "ChromeOSVideo"
+  },
+  {
+    "autotest_name": "video_VEAPerf.cfm",
     "master_name": "ChromeOSVideo"
   },
   {

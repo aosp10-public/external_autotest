@@ -46,7 +46,8 @@ class network_WiFi_SuspendStress(wifi_cell_test_base.WiFiCellTestBase):
         """
         try:
             out = self._host.run('cryptohome --action=status').stdout
-        except:
+        except Exception as e:
+            logging.warning('%s' % e)
             return False
         try:
             status = json.loads(out.strip())
@@ -107,7 +108,7 @@ class network_WiFi_SuspendStress(wifi_cell_test_base.WiFiCellTestBase):
         self._host = self.context.client.host
 
         for router_conf, client_conf in self._configurations:
-            self.context.configure(configuration_parameters=router_conf)
+            self.context.configure(ap_config=router_conf)
             assoc_params = xmlrpc_datatypes.AssociationParameters(
                 is_hidden=client_conf.is_hidden,
                 security_config=client_conf.security_config,

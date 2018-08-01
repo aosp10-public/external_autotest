@@ -73,6 +73,8 @@ class DrmTest(object):
 
     def run(self):
         try:
+            # Flush log files to disk in case of hang/reboot.
+            utils.run('sync')
             # TODO(pwang): consider TEE to another file if drmtests keep
             # spewing so much output.
             cmd_result = utils.run(
@@ -106,14 +108,14 @@ class DrmTest(object):
 drm_tests = {
     test.name: test
     for test in (
-        DrmTest('atomictest', 'atomictest -t all', min_kernel_version='4.4',
+        DrmTest('atomictest', 'atomictest -a -t all', min_kernel_version='4.4',
                 timeout=300),
         DrmTest('drm_cursor_test'),
         DrmTest('linear_bo_test'),
         DrmTest('mmap_test', timeout=300),
         DrmTest('null_platform_test'),
         DrmTest('swrast_test', display_required=False),
-        DrmTest('vgem_test', display_required=False),
+        DrmTest('vgem_test'),
         DrmTest('vk_glow', vulkan_required=True),
     )
 }
