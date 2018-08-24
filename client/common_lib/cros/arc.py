@@ -335,8 +335,8 @@ def get_removable_media_pid():
     job_pid = get_job_pid('arc-removable-media')
     # |job_pid| is the minijail process, obtain the PID of the process running
     # inside the mount namespace.
-    # FUSE process is the only process running as chronos in the process group.
-    return utils.system_output('pgrep -u chronos -g %s' % job_pid)
+    # FUSE process is the only process running as chronos in the session.
+    return utils.system_output('pgrep -u chronos -s %s' % job_pid)
 
 
 def get_obb_mounter_pid():
@@ -565,12 +565,9 @@ def _after_iteration_hook(obj):
         if obj.num_screenshots <= _MAX_SCREENSHOT_NUM:
             logging.warning('Iteration %d failed, taking a screenshot.',
                             obj.iteration)
-            from cros.graphics.gbm import crtcScreenshot
             try:
-                image = crtcScreenshot()
-                image.save('{}/{}_iter{}.png'.format(_SCREENSHOT_DIR_PATH,
-                                                     _SCREENSHOT_BASENAME,
-                                                     obj.iteration))
+                utils.run('screenshot "{}/{}_iter{}.png"'.format(
+                    _SCREENSHOT_DIR_PATH, _SCREENSHOT_BASENAME, obj.iteration))
             except Exception as e:
                 logging.warning('Unable to capture screenshot. %s', e)
         else:

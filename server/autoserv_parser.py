@@ -163,17 +163,17 @@ class autoserv_parser(object):
                                  dest='require_ssp', default=False,
                                  help=('Force the autoserv process to run with '
                                        'server-side packaging'))
-        self.parser.add_argument('--warn-no-ssp', action='store_true',
-                                 dest='warn_no_ssp', default=False,
-                                 help=('Post a warning in autoserv log that '
-                                       'the process runs in a drone without '
-                                       'server-side packaging support, even '
-                                       'though the job requires server-side '
-                                       'packaging'))
         self.parser.add_argument('--no_use_packaging', action='store_true',
                                  dest='no_use_packaging', default=False,
                                  help=('Disable install modes that use the '
                                        'packaging system.'))
+        self.parser.add_argument('--source_isolate', action='store',
+                                 type=str, default='',
+                                 dest='isolate',
+                                 help=('Hash for isolate containing build '
+                                       'contents needed for server-side '
+                                       'packaging. Takes precedence over '
+                                       'test_source_build, if present.'))
         self.parser.add_argument('--test_source_build', action='store',
                                  type=str, default='',
                                  dest='test_source_build',

@@ -27,7 +27,8 @@ class network_WiFi_BgscanBackoff(wifi_cell_test_base.WiFiCellTestBase):
         """Hook into super class to take control files parameters.
 
         @param commandline_args dict of parsed parameters from the autotest.
-        @param additional_params list of HostapConfig objects.
+        @param additional_params list of HostapConfig objects and LinuxSystem
+           capabilities.
 
         """
         self._config_first_ap = additional_params[0]
@@ -45,6 +46,7 @@ class network_WiFi_BgscanBackoff(wifi_cell_test_base.WiFiCellTestBase):
 
     def run_once(self):
         """Body of the test."""
+
         get_assoc_params = lambda conf: xmlrpc_datatypes.AssociationParameters(
                 ssid=self.context.router.get_ssid(instance=0),
                 bgscan_config=conf)

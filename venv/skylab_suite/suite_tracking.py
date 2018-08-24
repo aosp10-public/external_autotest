@@ -8,12 +8,43 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import contextlib
 import logging
 import logging.config
 
 from lucifer import autotest
 from skylab_suite import swarming_lib
 
+# Test status in _IGNORED_TEST_STATE won't be reported as test failure
+# if --use_fallback is specified. Or test may be reported as failure as
+# it's probably caused by the DUT is not well-provisioned.
+# TODO: Stop ignoring TASK_NO_RESOURCE if we drop TEST_NA feature.
+# Blocking issues:
+#     - Not all DUT labels are in skylab yet (crbug.com/871978)
+_IGNORED_TEST_STATE = [swarming_lib.TASK_NO_RESOURCE]
+
+
+@contextlib.contextmanager
+def _annotate_step(step_name):
+    try:
+        print('@@@SEED_STEP %s@@@' % step_name)
+        print('@@@STEP_CURSOR %s@@@' % step_name)
+        print('@@@STEP_STARTED@@@')
+        yield
+    finally:
+        print('@@@STEP_CLOSED@@@')
+
+
+def print_child_test_annotations(suite_handler):
+    """Print LogDog annotations for child tests."""
+    with _annotate_step('Scheduled Tests'):
+        for task_id, hspec in suite_handler.task_to_test_maps.iteritems():
+            anchor_test = hspec.test_spec.test.name
+            if suite_handler.is_provision():
+                anchor_test += '-' + hspec.test_spec.dut_name
+
+            show_text = '[Test-logs]: %s' % anchor_test
+            _print_task_link_annotation(task_id, show_text)
 
 
 def log_suite_results(suite_name, suite_handler):
@@ -44,13 +75,49 @@ def log_suite_results(suite_name, suite_handler):
     return return_code
 
 
+def _print_task_link_annotation(task_id, text):
+    """Print the link of task logs.
+
+    Given text: '[Test-logs]: dummy_Pass-chromeos4-row7-rack6-host19'
+          task_id: '3ee300e77a576e10'
+
+    The printed output will be:
+      [Test-logs]: dummy_Pass-chromeos4-row7-rack6-host19
+
+    Clicking it will direct you to
+      https://chrome-swarming.appspot.com/task?id=3ee300e77a576e10
+
+    @param anchor_test: a string to show on link.
+    @param task_id: a string task_id to form the swarming url.
+    """
+    annotations = autotest.chromite_load('buildbot_annotations')
+    print(annotations.StepLink(
+            text, swarming_lib.get_task_link(task_id)))
+
+
+def _get_task_id_for_task_summaries(task_id):
+    """Adjust the swarming task id to end in 0 for showing task summaries.
+
+    Milo results are only generated for task summaries, that is, tasks whose
+    ids end in 0. This function adjusts the last digit of the task_id. See
+    https://goo.gl/LE4rwV for details.
+    """
+    return task_id[:-1] + '0'
+
+
 def _log_buildbot_links(suite_handler, suite_name, test_results):
     logging.info('Links for buildbot:')
     annotations = autotest.chromite_load('buildbot_annotations')
     reporting_utils = autotest.load('server.cros.dynamic_suite.reporting_utils')
     print(annotations.StepLink(
-            'Link to suite: %s' % suite_name,
-            swarming_lib.get_task_link(suite_handler.suite_id)))
+            'Link to the suite create task: %s' % suite_name,
+            swarming_lib.get_task_link(_get_task_id_for_task_summaries(
+                    suite_handler.suite_id))))
+    if suite_handler.task_id is not None:
+        print(annotations.StepLink(
+                'Link to the suite wait task: %s' % suite_name,
+                swarming_lib.get_task_link(_get_task_id_for_task_summaries(
+                        suite_handler.task_id))))
 
     if (suite_handler.is_provision() and
         suite_handler.is_provision_successfully_finished()):
@@ -61,16 +128,9 @@ def _log_buildbot_links(suite_handler, suite_name, test_results):
     for result in test_results:
         if result['state'] not in [swarming_lib.TASK_COMPLETED_SUCCESS,
                                    swarming_lib.TASK_RUNNING]:
-            anchor_test = result['test_name']
-            if suite_handler.is_provision():
-                anchor_test += '-' + result['dut_name']
-
-            show_text = '[{prefix}]: {anchor}'.format(
-                    prefix='Test-logs',
-                    anchor=anchor_test)
-            print(annotations.StepLink(
-                    show_text,
-                    swarming_lib.get_task_link(result['task_ids'][0])))
+            _print_task_link_annotation(
+                    result['task_ids'][0],
+                    '[Test-logs]: %s' % _get_show_test_name(result))
 
             if not suite_handler.is_provision():
                 print(annotations.StepLink(
@@ -81,14 +141,47 @@ def _log_buildbot_links(suite_handler, suite_name, test_results):
 def _log_test_results(test_results):
     """Log child results for a suite."""
     logging.info('Start outputing test results:')
-    name_column_width = max(len(result['test_name']) for result in
-                            test_results) + 3
+    _log_test_results_with_logging(test_results)
+    _print_test_result_links_in_logdog(test_results)
+
+
+def _get_show_test_name(result):
+    """Get the test_name to show.
+
+    @param result: a test result dictionary, which is one item of the returned
+        list of _parse_test_results.
+    """
+    if result['dut_name']:
+        return result['test_name'] + '-' + result['dut_name']
+
+    return result['test_name']
+
+
+def _log_test_results_with_logging(test_results):
+    name_column_width = max(len(result['test_name']) + len(result['dut_name'])
+                            for result in test_results) + 3
     for result in test_results:
-        padded_name = result['test_name'].ljust(name_column_width)
+        padded_name = _get_show_test_name(result).ljust(name_column_width)
         logging.info('%s%s', padded_name, result['state'])
         if result['retry_count'] > 0:
             logging.info('%s  retry_count: %s', padded_name,
                          result['retry_count'])
+
+
+def _print_test_result_links_in_logdog(test_results):
+    with _annotate_step('Test Results'):
+        for result in test_results:
+            _print_single_test_result_link(result)
+
+
+def _print_single_test_result_link(result):
+    anchor_test = _get_show_test_name(result)
+    for idx, task_id in enumerate(result['task_ids']):
+        retry_suffix = ' (%dth retry)' % idx if idx > 0 else ''
+        anchor_test += retry_suffix
+        _print_task_link_annotation(
+                task_id,
+                '[%s]: %s' % (anchor_test, result['state']))
 
 
 def _parse_test_results(suite_handler):
@@ -179,7 +272,9 @@ def _get_suite_state(child_test_results, suite_handler):
 
     _final_suite_states = _get_final_suite_states()
     for result in child_test_results:
-        if result['state'] in _final_suite_states:
+        if ((suite_handler.use_fallback and
+             result['state'] not in _IGNORED_TEST_STATE) and
+            result['state'] in _final_suite_states):
             return _final_suite_states[result['state']]
 
     return (swarming_lib.TASK_COMPLETED_SUCCESS,

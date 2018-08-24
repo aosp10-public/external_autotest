@@ -19,7 +19,6 @@ from lucifer import autotest
 
 
 SERVICE_ACCOUNT = '/creds/skylab_swarming_bot/skylab_bot_service_account.json'
-SWARMING_SERVER = 'chrome-swarming.appspot.com'
 SKYLAB_DRONE_POOL = 'ChromeOSSkylab'
 SKYLAB_SUITE_POOL = 'ChromeOSSkylab-suite'
 
@@ -33,31 +32,34 @@ TASK_RUNNING = 'RUNNING'
 TASK_PENDING = 'PENDING'
 TASK_BOT_DIED = 'BOT_DIED'
 TASK_NO_RESOURCE = 'NO_RESOURCE'
+TASK_KILLED = 'KILLED'
 TASK_FINISHED_STATUS = [TASK_COMPLETED,
                         TASK_EXPIRED,
                         TASK_CANCELED,
                         TASK_TIMEDOUT,
                         TASK_BOT_DIED,
-                        TASK_NO_RESOURCE]
+                        TASK_NO_RESOURCE,
+                        TASK_KILLED]
 # The swarming task failure status to retry. TASK_CANCELED won't get
 # retried since it's intentionally aborted.
 TASK_STATUS_TO_RETRY = [TASK_EXPIRED, TASK_TIMEDOUT, TASK_BOT_DIED,
                         TASK_NO_RESOURCE]
 
-DEFAULT_EXPIRATION_SECS = 30
+DEFAULT_EXPIRATION_SECS = 10 * 60
 DEFAULT_TIMEOUT_SECS = 60 * 60
 
 # A mapping of priorities for skylab hwtest tasks. In swarming,
 # lower number means high priorities. Priority lower than 48 will
-# be special tasks.
+# be special tasks. The upper bound for priority is 255.
 # Use the same priorities mapping as chromite/lib/constants.py
 SKYLAB_HWTEST_PRIORITIES_MAP = {
-    'Weekly': 160,
-    'Daily': 145,
-    'PostBuild': 130,
-    'Default': 100,
-    'Build': 80,
-    'PFQ': 65,
+    'Weekly': 230,
+    'CTS': 215,
+    'Daily': 200,
+    'PostBuild': 170,
+    'Default': 140,
+    'Build': 110,
+    'PFQ': 80,
     'CQ': 50,
     'Super': 49,
 }
@@ -120,11 +122,11 @@ def _get_client():
 def get_basic_swarming_cmd(command):
     return [_get_client(), command,
             '--auth-service-account-json', SERVICE_ACCOUNT,
-            '--swarming', SWARMING_SERVER]
+            '--swarming', os.environ.get('SWARMING_SERVER')]
 
 
-def make_fallback_request_dict(cmds, slices_dimensions, task_name, priority,
-                               tags, user,
+def make_fallback_request_dict(cmds, slices_dimensions, slices_expiration_secs,
+                               task_name, priority, tags, user,
                                parent_task_id='',
                                expiration_secs=DEFAULT_EXPIRATION_SECS,
                                grace_period_secs=DEFAULT_TIMEOUT_SECS,
@@ -135,10 +137,10 @@ def make_fallback_request_dict(cmds, slices_dimensions, task_name, priority,
     @param cmds: A list of cmd to run on swarming bots.
     @param slices_dimensions: A list of dict to indicates different tries'
         dimensions.
+    @param slices_expiration_secs: A list of Integer to indicates each slice's
+        expiration_secs.
     @param task_name: The request's name.
     @param priority: The request's priority. An integer.
-    @param expiration_secs: The expiration seconds for the each cmd to wait
-        to be expired.
     @param grace_period_secs: The seconds to send a task after a SIGTERM before
         sending it a SIGKILL.
     @param execution_timeout_secs: The seconds to run before a task gets
@@ -149,8 +151,10 @@ def make_fallback_request_dict(cmds, slices_dimensions, task_name, priority,
     @return a json-compatible dict, as a request for swarming call.
     """
     assert len(cmds) == len(slices_dimensions)
+    assert len(cmds) == len(slices_expiration_secs)
     task_slices = []
-    for cmd, dimensions in zip(cmds, slices_dimensions):
+    for cmd, dimensions, expiration_secs in zip(cmds, slices_dimensions,
+                                                slices_expiration_secs):
         properties = TaskProperties(
                 command=cmd,
                 dimensions=dimensions,
@@ -219,7 +223,7 @@ def _to_raw_request(request):
 
 
 def get_task_link(task_id):
-    return 'https://%s/user/task/%s' % (SWARMING_SERVER, task_id)
+    return '%s/user/task/%s' % (os.environ.get('SWARMING_SERVER'), task_id)
 
 
 def get_task_final_state(task):
@@ -286,7 +290,8 @@ def query_task_by_tags(tags):
                                          urllib.urlencode(conditions)]
     cros_build_lib = autotest.chromite_load('cros_build_lib')
     result = cros_build_lib.RunCommand(swarming_cmd, capture_output=True)
-    return json.loads(result.output)['items']
+    json_output = json.loads(result.output)
+    return json_output.get('items', [])
 
 
 def query_task_by_id(task_id):

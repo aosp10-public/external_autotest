@@ -67,10 +67,10 @@ class db_sql(object):
     """Data access."""
 
     def __init__(self, debug=False, autocommit=True, host=None,
-                 database=None, user=None, password=None):
+                 database=None, user=None, password=None, proxy_socket=None):
         self.debug = debug
         self.autocommit = autocommit
-        self._load_config(host, database, user, password)
+        self._load_config(host, database, user, password, proxy_socket)
 
         self.con = None
         self._init_db()
@@ -92,7 +92,7 @@ class db_sql(object):
         self.machine_group = {}
 
 
-    def _load_config(self, host, database, user, password):
+    def _load_config(self, host, database, user, password, proxy_socket):
         """Loads configuration settings required to connect to the database.
 
         This will try to connect to use the settings prefixed with global_db_.
@@ -100,6 +100,8 @@ class db_sql(object):
 
         If parameters are supplied, these will be taken instead of the values
         in global_config.
+
+        When proxy_socket is set, 'host' will be bypassed.
 
         @param host: If set, this host will be used, if not, the host will be
                      retrieved from global_config.
@@ -109,6 +111,8 @@ class db_sql(object):
                          user will be retrieved from global_config.
         @param password: If set, this password will be used, if not, the
                          password will be retrieved from global_config.
+        @param proxy_socket: If set, this proxy_socket will be used, if not, the
+                         proxy_socket will be retrieved from global_config.
         """
         database_settings = database_settings_helper.get_global_db_config()
 
@@ -116,9 +120,10 @@ class db_sql(object):
         self.host = host or database_settings['HOST']
         self.database = database or database_settings['NAME']
 
-        # grab the user and password
+        # grab authentication information
         self.user = user or database_settings['USER']
         self.password = password or database_settings['PASSWORD']
+        self.proxy_socket = proxy_socket or database_settings['PROXY_SOCKET']
 
         # grab the timeout configuration
         self.query_timeout =(
@@ -157,7 +162,8 @@ class db_sql(object):
 
         # create the db connection and cursor
         self.con = self.connect(self.host, self.database,
-                                self.user, self.password, self.port)
+                                self.user, self.password, self.port,
+                                self.proxy_socket)
         self.cur = self.con.cursor()
 
 
@@ -168,18 +174,27 @@ class db_sql(object):
 
     @retry.retry(driver.OperationalError, timeout_min=10,
                  delay_sec=5, callback=_connection_retry_callback)
-    def connect(self, host, database, user, password, port):
+    def connect(self, host, database, user, password, port, proxy_socket):
         """Open and return a connection to mysql database."""
         connection_args = {
-            'host': host,
-            'user': user,
             'db': database,
+            'user': user,
             'passwd': password,
             'connect_timeout': 20,
         }
         if port:
             connection_args['port'] = int(port)
-        return driver.connect(**connection_args)
+        # Connect using proxy socket if possible.
+        if proxy_socket:
+            try:
+                return driver.connect(unix_socket=proxy_socket,
+                                      **connection_args)
+            # pylint: disable=catching-non-exception
+            except driver.OperationalError:
+                # Fallback to connect using user/host/password.
+                pass
+
+        return driver.connect(host=host, **connection_args)
 
 
     def run_with_retry(self, function, *args, **dargs):
@@ -612,7 +627,11 @@ class db_sql(object):
         for key, value in test.attributes.iteritems():
             data = {'test_idx': test_idx, 'attribute': key,
                     'value': value}
-            self.insert('tko_test_attributes', data, commit=commit)
+            try:
+                self.insert('tko_test_attributes', data, commit=commit)
+            except:
+                _log_error('Uploading attribute %r' % (data))
+                raise
 
         if not is_update:
             for label_index in test.labels:
@@ -827,6 +846,21 @@ class db_sql(object):
             return rows[0][0]
         else:
             return None
+
+
+    def get_child_tests_by_parent_task_id(self, parent_task_id):
+        """Get the child tests by a parent task id.
+
+        @param parent_task_id: A string parent task id in tko_task_references.
+        @return: A list of view dicts, which has key 'test_name' and 'status'.
+        """
+        rows = self.select('tko_job_idx', 'tko_task_references',
+                           {'parent_task_id': parent_task_id})
+        tko_job_ids = [str(r[0]) for r in rows]
+        fields = ['test_name', 'status']
+        where = 'job_idx in (%s)' % ', '.join(tko_job_ids)
+        rows = self.select(', '.join(fields), 'tko_test_view_2', where)
+        return [{'test_name': r[0], 'status': r[1]} for r in rows]
 
 
 def db(*args, **dargs):

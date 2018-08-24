@@ -116,6 +116,9 @@ class LinuxRouter(site_linux_system.LinuxSystem):
 
     PROBE_RESPONSE_FOOTER_FILE = '/tmp/autotest-probe_response_footer'
 
+    _RNG_AVAILABLE = '/sys/class/misc/hw_random/rng_available'
+    _RNG_CURRENT = '/sys/class/misc/hw_random/rng_current'
+
     def get_capabilities(self):
         """@return iterable object of AP capabilities for this system."""
         caps = set()
@@ -231,6 +234,9 @@ class LinuxRouter(site_linux_system.LinuxSystem):
         else:
             self.host.run('stop avahi', ignore_status=True)
 
+        # Some routers have bad (slow?) random number generators.
+        self.rng_configure()
+
 
     def close(self):
         """Close global resources held by this system."""
@@ -266,11 +272,8 @@ class LinuxRouter(site_linux_system.LinuxSystem):
 
         """
         # Figure out the correct interface.
-        if configuration.min_streams is None:
-            interface = self.get_wlanif(configuration.frequency, 'managed')
-        else:
-            interface = self.get_wlanif(
-                configuration.frequency, 'managed', configuration.min_streams)
+        interface = self.get_wlanif(configuration.frequency, 'managed',
+                                    configuration.min_streams)
         phy_name = self.iw_runner.get_interface(interface).phy
 
         conf_file = self.HOSTAPD_CONF_FILE_PATTERN % interface
@@ -450,6 +453,45 @@ class LinuxRouter(site_linux_system.LinuxSystem):
         # cells.
         salt = ''.join([random.choice(self.SUFFIX_LETTERS) for x in range(5)])
         return '_'.join([self._ssid_prefix, unique, salt, suffix])[-32:]
+
+
+    def rng_configure(self):
+        """Configure the random generator to our liking.
+
+        Some routers (particularly, Gale) seem to have bad Random Number
+        Generators, such that hostapd can't always generate keys fast enough.
+        The on-board TPM seems to serve as a better generator, so we try to
+        switch to that if available.
+
+        Symptoms of a slow RNG: hostapd complains with:
+
+          WPA: Not enough entropy in random pool to proceed - reject first
+          4-way handshake
+
+        Ref:
+        https://chromium.googlesource.com/chromiumos/third_party/hostap/+/7ea51f728bb7/src/ap/wpa_auth.c#1854
+
+        Linux devices may have RNG parameters at
+        /sys/class/misc/hw_random/rng_{available,current}. See:
+
+          https://www.kernel.org/doc/Documentation/hw_random.txt
+
+        """
+
+        available = self.host.run('cat %s' % self._RNG_AVAILABLE, \
+                                  ignore_status=True).stdout.strip().split(' ')
+        # System may not have HWRNG support. Just skip this.
+        if available == "":
+            return
+        current = self.host.run('cat %s' % self._RNG_CURRENT).stdout. \
+                                strip()
+        want_rng = "tpm-rng"
+
+        logging.info("Available / current RNGs on router: %r / %s",
+                     available, current)
+        if want_rng in available and want_rng != current:
+            logging.info("Switching RNGs: %s -> %s", current, want_rng)
+            self.host.run('echo -n "%s" > %s' % (want_rng, self._RNG_CURRENT))
 
 
     def hostap_configure(self, configuration, multi_interface=None):

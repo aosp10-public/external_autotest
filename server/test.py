@@ -84,6 +84,9 @@ def install_autotest_and_run(func):
 
 
 class _sysinfo_logger(object):
+    AUTOTEST_PARENT_DIR = '/tmp/sysinfo'
+    OUTPUT_PARENT_DIR = '/tmp'
+
     def __init__(self, job):
         self.job = job
         self.pickle = None
@@ -109,10 +112,14 @@ class _sysinfo_logger(object):
             if not self.host.is_client_install_supported:
                 return self.host, None, None
             try:
-                tmp_dir = self.host.get_tmp_dir(parent="/tmp/sysinfo")
+                # Remove existing autoserv-* directories before creating more
+                self.host.delete_all_tmp_dirs(self.AUTOTEST_PARENT_DIR)
+                self.host.delete_all_tmp_dirs(self.OUTPUT_PARENT_DIR)
+
+                tmp_dir = self.host.get_tmp_dir(self.AUTOTEST_PARENT_DIR)
                 self.autotest = autotest.Autotest(self.host)
                 self.autotest.install(autodir=tmp_dir)
-                self.outputdir = self.host.get_tmp_dir()
+                self.outputdir = self.host.get_tmp_dir(self.OUTPUT_PARENT_DIR)
             except:
                 # if installation fails roll back the host
                 try:
@@ -297,7 +304,6 @@ def runtest(job, url, tag, args, dargs):
             existing_hook(mytest)
     logging_args[0] = log_kernel_hook
 
-    utils.before_force_close(lambda: logger.cleanup() if logger else None)
     try:
         common_test.runtest(job, url, tag, args, dargs, locals(), globals(),
                             *logging_args)

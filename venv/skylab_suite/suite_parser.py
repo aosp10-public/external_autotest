@@ -10,6 +10,7 @@ from __future__ import print_function
 
 import argparse
 import ast
+import sys
 
 from lucifer import autotest
 from skylab_suite import cros_suite
@@ -72,6 +73,15 @@ def make_parser():
         "--job_keyvals", type=ast.literal_eval, default={},
         action="store",
         help="A dict of job keyvals to be passed to child jobs.")
+    parser.add_argument(
+        "--minimum_duts", type=int, default=1, action="store",
+        help="A minimum required numbers of DUTs to run this suite.")
+    parser.add_argument(
+        "--use_fallback", action="store_true",
+        help=('Whether to kick off the child tests with fallback request. '
+              'If it is enabled, the suite will be kicked off no matter '
+              'whether there are well-provisioned DUTs. If not, '
+              'provision will be executed before each test first.'))
 
     # Swarming-related parameters.
     parser.add_argument(
@@ -98,6 +108,9 @@ def make_parser():
         '--timeout_mins', default=90, type=int, action='store',
         help='Maximum minutes to wait for a suite to finish.')
     parser.add_argument(
+        '--passed_mins', default=0, type=int, action='store',
+        help='The minutes that this suite already runs for.')
+    parser.add_argument(
         '--run_prod_code', action='store_true', default=False,
         help='Run the test code that lives in prod aka the test '
         'code currently on the lab servers.')
@@ -111,7 +124,7 @@ def make_parser():
 
     # Abort-related parameters.
     parser.add_argument(
-        '--abort_limit', default=1, type=int, action='store',
+        '--abort_limit', default=sys.maxint, type=int, action='store',
         help=('Only abort first N parent tasks which fulfill the search '
               'requirements.'))
     parser.add_argument(
@@ -125,9 +138,6 @@ def verify_and_clean_options(options):
     """Validate options."""
     if options.suite_args is None:
         options.suite_args = {}
-
-    if options.suite_task_ids:
-        options.abort_limit = len(options.suite_task_ids)
 
     return True
 
@@ -148,4 +158,6 @@ def parse_suite_spec(options):
             board=options.board,
             pool=options.pool,
             job_keyvals=options.job_keyvals,
+            minimum_duts=options.minimum_duts,
+            timeout_mins=options.timeout_mins,
     )

@@ -37,6 +37,7 @@ class ChromeCr50(chrome_ec.ChromeConsole):
     # The amount of time you need to show physical presence.
     PP_SHORT = 15
     PP_LONG = 300
+    CCD_PASSWORD_RATE_LIMIT = 3
     IDLE_COUNT = 'count: (\d+)'
     # The version has four groups: the partition, the header version, debug
     # descriptor and then version string.
@@ -122,6 +123,11 @@ class ChromeCr50(chrome_ec.ChromeConsole):
                 raise error.TestFail('Failed to set %s to %s' % (cap, config))
 
 
+    def in_dev_mode(self):
+        """Return True if cr50 thinks the device is in dev mode"""
+        return 'dev_mode' in self.get_ccd_info()['TPM']
+
+
     def get_ccd_info(self):
         """Get the current ccd state.
 
@@ -151,6 +157,11 @@ class ChromeCr50(chrome_ec.ChromeConsole):
             info[key.strip()] = value.strip()
         logging.info('Current CCD settings:\n%s', pprint.pformat(info))
         return info
+
+
+    def get_cap(self, cap):
+        """Returns the capabilitiy from the capability dictionary"""
+        return self.get_cap_dict()[cap]
 
 
     def get_cap_dict(self):
@@ -499,7 +510,9 @@ class ChromeCr50(chrome_ec.ChromeConsole):
     def _level_change_req_pp(self, level):
         """Returns True if setting the level will require physical presence"""
         testlab_pp = level != 'testlab open' and 'testlab' in level
-        open_pp = level == 'open'
+        # If the level is open and the ccd capabilities say physical presence
+        # is required, then physical presence will be required.
+        open_pp = level == 'open' and self.get_cap('OpenNoLongPP') != 'Always'
         return testlab_pp or open_pp
 
 
@@ -607,6 +620,13 @@ class ChromeCr50(chrome_ec.ChromeConsole):
         # take more than 3 seconds.
         self._servo.set_nocheck('cr50_uart_timeout', self.CONSERVATIVE_CCD_WAIT)
         # Start the unlock process.
+
+        if level == 'open' or level == 'unlock':
+            logging.info('waiting %d seconds, the minimum time between'
+                         ' ccd password attempts',
+                         self.CCD_PASSWORD_RATE_LIMIT)
+            time.sleep(self.CCD_PASSWORD_RATE_LIMIT)
+
         try:
             cmd = 'ccd %s%s' % (level, (' ' + password) if password else '')
             rv = self.send_command_get_output(cmd, [cmd + '(.*)>'])[0][1]

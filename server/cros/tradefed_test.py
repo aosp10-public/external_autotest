@@ -198,6 +198,22 @@ class TradefedTest(test.test):
                                  abilist)
         self._abilist = str(list(abilist)[0]).split(',')
 
+    def _calculate_timeout_factor(self, bundle):
+        """ Calculate the multiplicative factor for timeout.
+
+        The value equals to the times each test case is run, which is determined
+        by the intersection of the supported ABIs of the CTS/GTS bundle and that
+        of the tested device."""
+        arm_abis = set(('armeabi-v7a', 'arm64-v8a'))
+        x86_abis = set(('x86', 'x86_64'))
+        if bundle == 'arm':
+            tradefed_abis = arm_abis
+        elif bundle == 'x86':
+            tradefed_abis = x86_abis
+        else:
+            tradefed_abis = arm_abis | x86_abis
+        self._timeout_factor = len(set(self._get_abilist()) & tradefed_abis)
+
     @contextlib.contextmanager
     def _login_chrome(self, **cts_helper_kwargs):
         """Returns Chrome log-in context manager.
@@ -492,15 +508,11 @@ class TradefedTest(test.test):
         @param uri: The Google Storage or dl.google.com uri.
         @return Path to the downloaded object, name.
         """
-        # Split uri into 3 pieces for use by gsutil and also by wget.
-        parsed = urlparse.urlparse(uri)
-        filename = os.path.basename(parsed.path)
         # We are hashing the uri instead of the binary. This is acceptable, as
         # the uris are supposed to contain version information and an object is
         # not supposed to be changed once created.
         output_dir = os.path.join(self._tradefed_cache,
                                   hashlib.md5(uri).hexdigest())
-        output = os.path.join(output_dir, filename)
         # Check for existence of cache entry. We check for directory existence
         # instead of file existence, so that _install_bundle can delete original
         # zip files to save disk space.
@@ -512,8 +524,22 @@ class TradefedTest(test.test):
             if os.listdir(output_dir):
                 logging.info('Skipping download of %s, reusing content of %s.',
                              uri, output_dir)
-                return output
+                return os.path.join(output_dir,
+                    os.path.basename(urlparse.urlparse(uri).path))
             logging.error('Empty cache entry detected %s', output_dir)
+        return self._download_to_dir(uri, output_dir)
+
+    def _download_to_dir(self, uri, output_dir):
+        """Downloads the gs|http|https uri from the storage server.
+
+        @param uri: The Google Storage or dl.google.com uri.
+        @output_dir: The directory where the downloaded file should be placed.
+        @return Path to the downloaded object, name.
+        """
+        # Split uri into 3 pieces for use by gsutil and also by wget.
+        parsed = urlparse.urlparse(uri)
+        filename = os.path.basename(parsed.path)
+        output = os.path.join(output_dir, filename)
 
         self._safe_makedirs(output_dir)
         if parsed.scheme not in ['gs', 'http', 'https']:
@@ -624,7 +650,6 @@ class TradefedTest(test.test):
             # We always copy files to give tradefed a clean copy of the
             # bundle.
             unzipped_local = self._instance_copytree(cache_unzipped)
-        self._abi = 'x86' if 'x86-x86' in gs_uri else 'arm'
         return unzipped_local
 
     def _install_files(self, gs_dir, files, permission):
@@ -959,7 +984,7 @@ class TradefedTest(test.test):
                 'Error: failed to copy test subplan %s to CTS bundle. %s' %
                 test_subplan_file, e)
 
-    def _should_skip_test(self):
+    def _should_skip_test(self, bundle):
         """Some tests are expected to fail and are skipped.
 
         Subclasses should override with specific details.
@@ -1013,6 +1038,7 @@ class TradefedTest(test.test):
                                    needs_push_media=False,
                                    target_module=None,
                                    target_plan=None,
+                                   bundle=None,
                                    cts_uri=None,
                                    login_precondition_commands=[],
                                    precondition_commands=[]):
@@ -1021,7 +1047,7 @@ class TradefedTest(test.test):
         We first kick off the specified module. Then rerun just the failures
         on the next MAX_RETRY iterations.
         """
-        if self._should_skip_test():
+        if self._should_skip_test(bundle):
             logging.warning('Skipped test %s', ' '.join(test_name))
             return
 
@@ -1044,6 +1070,7 @@ class TradefedTest(test.test):
                     reboot=self._should_reboot(steps),
                     dont_override_profile=pushed_media) as current_logins:
                 self._ready_arc()
+                self._calculate_timeout_factor(bundle)
                 self._run_precondition_scripts(precondition_commands, steps)
 
                 # Only push media for tests that need it. b/29371037

@@ -11,6 +11,7 @@ NOTE: This module should only be used in the context of a running test. Any
 
 import common
 from autotest_lib.client.common_lib import global_config
+from autotest_lib.server.cros import autoupdater
 from autotest_lib.server.cros import provision
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 
@@ -91,14 +92,14 @@ def _clear_host_attributes_before_provision(host, info):
 
 
 def machine_install_and_update_labels(host, update_url,
-                                      force_full_update=False,
+                                      use_quick_provision=False,
                                       with_cheets=False):
-    """Calls machine_install and updates the version labels on a host.
+    """Install a build and update the version labels on a host.
 
-    @param host: Host object to run machine_install on.
+    @param host: Host object where the build is to be installed.
     @param update_url: URL of the build to install.
-    @param force_update: If true, force update even if the target is
-        already running the requested version.
+    @param use_quick_provision:  If true, then attempt to use
+        quick-provision for the update.
     @param with_cheets: If true, installation is for a specific, custom
         version of Android for a target running ARC.
     """
@@ -106,14 +107,9 @@ def machine_install_and_update_labels(host, update_url,
     info.clear_version_labels()
     _clear_host_attributes_before_provision(host, info)
     host.host_info_store.commit(info)
-    # If ENABLE_DEVSERVER_TRIGGER_AUTO_UPDATE is enabled for this type
-    # of host, devserver will be used to trigger auto-update.
-    if host.support_devserver_provision:
-        image_name, host_attributes = host.machine_install_by_devserver(
-                update_url, force_full_update=force_full_update)
-    else:
-        image_name, host_attributes = host.machine_install(update_url)
-
+    updater = autoupdater.ChromiumOSUpdater(
+            update_url, host=host, use_quick_provision=use_quick_provision)
+    image_name, host_attributes = updater.run_update()
     info = host.host_info_store.get()
     info.attributes.update(host_attributes)
     if with_cheets:

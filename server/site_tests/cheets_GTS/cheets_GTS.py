@@ -14,22 +14,25 @@
 
 import logging
 import os
+import shutil
+import tempfile
 
 from autotest_lib.server import utils
 from autotest_lib.server.cros import tradefed_test
 
 # Maximum default time allowed for each individual GTS module.
 _GTS_TIMEOUT_SECONDS = 3600
-_PARTNER_GTS_LOCATION = 'gs://chromeos-partner-gts/gts-6.0_r1-4868992.zip'
+_PARTNER_GTS_BUCKET = 'gs://chromeos-partner-gts/'
+_PARTNER_GTS_LOCATION = _PARTNER_GTS_BUCKET + 'gts-6.0_r1-4868992.zip'
+_PARTNER_GTS_AUTHKEY = _PARTNER_GTS_BUCKET + 'gts-arc.json'
 
 
 class cheets_GTS(tradefed_test.TradefedTest):
     """Sets up tradefed to run GTS tests."""
     version = 1
 
-    # TODO(bmgordon): Remove grunt once the bulk of failing tests are fixed.
     # TODO(teravest): Remove octopus once the bulk of failing tests are fixed.
-    _BOARD_RETRY = {'betty': 0, 'grunt': 0, 'octopus': 0}
+    _BOARD_RETRY = {'betty': 0, 'octopus': 0}
     _CHANNEL_RETRY = {'dev': 5, 'beta': 5, 'stable': 5}
     _SHARD_CMD = '--shard-count'
 
@@ -52,20 +55,11 @@ class cheets_GTS(tradefed_test.TradefedTest):
     def _get_default_bundle_url(self, bundle):
         return _PARTNER_GTS_LOCATION
 
+    def _get_default_authkey(self):
+        return _PARTNER_GTS_AUTHKEY
+
     def _get_tradefed_base_dir(self):
         return 'android-gts'
-
-    # TODO(ihf): move to tradefed_test, but first unify with CTS.
-    def _get_timeout_factor(self):
-        """Returns the factor to be multiplied to the timeout parameter.
-        The factor roughly grows with the number of ABIs but the fit does not
-        have to be perfect as runtime is hard to predict."""
-        # The list of ABIs recognized by tradefed is taken from
-        # tools/tradefederation/src/com/android/tradefed/util/AbiUtils.java
-        tradefed_abis = set(('armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64',
-            'mips', 'mips64'))
-        self._timeoutfactor = len(set(self._get_abilist()) & tradefed_abis)
-        return self._timeoutfactor
 
     def _run_tradefed(self, commands):
         """Kick off GTS.
@@ -74,15 +68,19 @@ class cheets_GTS(tradefed_test.TradefedTest):
         @return: The result object from utils.run.
         """
         gts_tradefed = os.path.join(self._repository, 'tools', 'gts-tradefed')
+        env = None
+        if self._authkey:
+            env = dict(os.environ, APE_API_KEY=self._authkey)
         with tradefed_test.adb_keepalive(self._get_adb_targets(),
                                          self._install_paths):
             for command in commands:
-                timeout = self._timeout * self._get_timeout_factor()
+                timeout = self._timeout * self._timeout_factor
                 logging.info('RUN(timeout=%d): ./gts-tradefed %s', timeout,
                              ' '.join(command))
                 output = self._run(
                     gts_tradefed,
                     args=tuple(command),
+                    env=env,
                     timeout=timeout,
                     verbose=True,
                     ignore_status=False,
@@ -106,6 +104,7 @@ class cheets_GTS(tradefed_test.TradefedTest):
                  needs_push_media=False,
                  precondition_commands=[],
                  login_precondition_commands=[],
+                 authkey=None,
                  timeout=_GTS_TIMEOUT_SECONDS):
         """Runs the specified GTS once, but with several retries.
 
@@ -135,15 +134,21 @@ class cheets_GTS(tradefed_test.TradefedTest):
         self._timeout = timeout
         if self._get_release_channel() == 'stable':
             self._timeout += 3600
-        # Retries depend on channel.
-        self._timeoutfactor = None
 
-        self._run_tradefed_with_retries(
-            test_name=test_name,
-            run_template=run_template,
-            retry_template=retry_template,
-            target_module=target_module,
-            target_plan=target_plan,
-            needs_push_media=needs_push_media,
-            login_precondition_commands=login_precondition_commands,
-            precondition_commands=precondition_commands)
+        # Download the GTS auth key to the local temp directory.
+        tmpdir = tempfile.mkdtemp()
+        try:
+            self._authkey = self._download_to_dir(
+                authkey or self._get_default_authkey(), tmpdir)
+
+            self._run_tradefed_with_retries(
+                test_name=test_name,
+                run_template=run_template,
+                retry_template=retry_template,
+                target_module=target_module,
+                target_plan=target_plan,
+                needs_push_media=needs_push_media,
+                login_precondition_commands=login_precondition_commands,
+                precondition_commands=precondition_commands)
+        finally:
+            shutil.rmtree(tmpdir)

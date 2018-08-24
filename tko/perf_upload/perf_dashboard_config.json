@@ -159,6 +159,10 @@
     "master_name": "ChromeOS_Graphics"
   },
   {
+    "autotest_name": "graphics_KernelConfig",
+    "master_name": "ChromeOS_Graphics"
+  },
+  {
     "autotest_name": "graphics_Idle",
     "master_name": "ChromeOS_Graphics"
   },
@@ -563,24 +567,9 @@
     "dashboard_test_name": "cros_ui_smoothness"
   },
   {
-    "autotest_name": "telemetry_Benchmarks.dromaeo.domcoreattr",
+    "autotest_name": "telemetry_Benchmarks.dromaeo",
     "master_name": "ChromeOSPerf",
-    "dashboard_test_name": "dromaeo.domcoreattr"
-  },
-  {
-    "autotest_name": "telemetry_Benchmarks.dromaeo.domcoremodify",
-    "master_name": "ChromeOSPerf",
-    "dashboard_test_name": "dromaeo.domcoremodify"
-  },
-  {
-    "autotest_name": "telemetry_Benchmarks.dromaeo.domcorequery",
-    "master_name": "ChromeOSPerf",
-    "dashboard_test_name": "dromaeo.domcorequery"
-  },
-  {
-    "autotest_name": "telemetry_Benchmarks.dromaeo.domcoretraverse",
-    "master_name": "ChromeOSPerf",
-    "dashboard_test_name": "dromaeo.domcoretraverse"
+    "dashboard_test_name": "dromaeo"
   },
   {
     "autotest_name": "telemetry_Benchmarks.image_decoding.image_decoding_measurement",
@@ -621,11 +610,6 @@
     "autotest_name": "telemetry_Benchmarks.page_cycler_v2.typical_25",
     "master_name": "ChromeOSPerf",
     "dashboard_test_name": "page_cycler_v2.typical_25"
-  },
-  {
-    "autotest_name": "telemetry_Benchmarks.robohornet_pro",
-    "master_name": "ChromeOSPerf",
-    "dashboard_test_name": "robohornet_pro"
   },
   {
     "autotest_name": "telemetry_Benchmarks.session_restore.cold.typical_25",
@@ -671,11 +655,6 @@
     "autotest_name": "telemetry_Benchmarks.speedometer",
     "master_name": "ChromeOSPerf",
     "dashboard_test_name": "speedometer"
-  },
-  {
-    "autotest_name": "telemetry_Benchmarks.sunspider",
-    "master_name": "ChromeOSPerf",
-    "dashboard_test_name": "sunspider"
   },
   {
     "autotest_name": "telemetry_Benchmarks.tab_switching.top_10",

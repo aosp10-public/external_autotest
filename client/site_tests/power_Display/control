@@ -9,7 +9,8 @@ TEST_TYPE = "client"
 ATTRIBUTES = "suite:power_daily"
 
 DOC = """
-This test records power related statistics while displaying different static pages.
+This test records power related statistics while displaying different static
+pages.
 """
 
 job.run_test('power_Display')

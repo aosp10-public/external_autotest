@@ -21,7 +21,6 @@ from autotest_lib.client.cros import constants as client_constants
 from autotest_lib.client.cros import cros_ui
 from autotest_lib.server import afe_utils
 from autotest_lib.server import utils as server_utils
-from autotest_lib.server.cros import autoupdater
 from autotest_lib.server.cros import provision
 from autotest_lib.server.cros.dynamic_suite import constants as ds_constants
 from autotest_lib.server.cros.dynamic_suite import tools, frontend_wrappers
@@ -45,9 +44,6 @@ except ImportError:
 
 
 CONFIG = global_config.global_config
-ENABLE_DEVSERVER_TRIGGER_AUTO_UPDATE = CONFIG.get_config_value(
-        'CROS', 'enable_devserver_trigger_auto_update', type=bool,
-        default=False)
 
 
 class FactoryImageCheckerException(error.AutoservError):
@@ -61,7 +57,6 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
     VERSION_PREFIX = provision.CROS_VERSION_PREFIX
 
     _AFE = frontend_wrappers.RetryingAFE(timeout_min=5, delay_sec=10)
-    support_devserver_provision = ENABLE_DEVSERVER_TRIGGER_AUTO_UPDATE
 
     # Timeout values (in seconds) associated with various Chrome OS
     # state changes.
@@ -529,190 +524,6 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
         return tools.factory_image_url_pattern() % (devserver.url(), image_name)
 
 
-    def _get_au_monarch_fields(self, devserver, build):
-        """Form monarch fields by given devserve & build for auto-update.
-
-        @param devserver: the devserver (ImageServer instance) for auto-update.
-        @param build: the build to be updated.
-
-        @return A dictionary of monach fields.
-        """
-        try:
-            board, build_type, milestone, _ = server_utils.ParseBuildName(build)
-        except server_utils.ParseBuildNameException:
-            logging.warning('Unable to parse build name %s. Something is '
-                            'likely broken, but will continue anyway.',
-                            build)
-            board, build_type, milestone = ('', '', '')
-
-        monarch_fields = {
-                'dev_server': devserver.hostname,
-                'board': board,
-                'build_type': build_type,
-                'milestone': milestone
-        }
-        return monarch_fields
-
-
-    def _retry_auto_update_with_new_devserver(self, build, last_devserver,
-                                              force_full_update, force_original,
-                                              quick_provision):
-        """Kick off auto-update by devserver and send metrics.
-
-        @param build: the build to update.
-        @param last_devserver: the last devserver that failed to provision.
-        @param force_full_update: see |machine_install_by_devserver|'s
-                                  force_full_update for details.
-        @param force_original: Whether to force stateful update with the
-                               original payload.
-        @param quick_provision: Attempt to use quick provision path first.
-
-        @return the result of |auto_update| in dev_server.
-        """
-        devserver = dev_server.resolve(
-                build, self.hostname, ban_list=[last_devserver.url()])
-        devserver.trigger_download(build, synchronous=False)
-        monarch_fields = self._get_au_monarch_fields(devserver, build)
-        logging.debug('Retry auto_update: resolved devserver for '
-                      'auto-update: %s', devserver.url())
-
-        # Add metrics
-        install_with_dev_counter = metrics.Counter(
-                'chromeos/autotest/provision/install_with_devserver')
-        install_with_dev_counter.increment(fields=monarch_fields)
-        c = metrics.Counter(
-                'chromeos/autotest/provision/retry_by_devserver')
-        monarch_fields['last_devserver'] = last_devserver.hostname
-        monarch_fields['host'] = self.hostname
-        c.increment(fields=monarch_fields)
-
-        # Won't retry auto_update in a retry of auto-update.
-        # In other words, we only retry auto-update once with a different
-        # devservers.
-        devserver.auto_update(
-                self.hostname, build,
-                original_board=self.get_board().replace(
-                        ds_constants.BOARD_PREFIX, ''),
-                original_release_version=self.get_release_version(),
-                log_dir=self.job.resultdir,
-                force_update=True,
-                full_update=force_full_update,
-                force_original=force_original,
-                quick_provision=quick_provision)
-
-
-    def machine_install_by_devserver(self, update_url, force_full_update=False):
-        """Ultiize devserver to install the DUT.
-
-        (TODO) crbugs.com/627269: The logic in this function has some overlap
-        with those in function machine_install. The merge will be done later,
-        not in the same CL.
-
-        @param update_url: The update_url or build for the host to update.
-        @param force_full_update: If True, do not attempt to run stateful
-                update, force a full reimage. If False, try stateful update
-                first when the dut is already installed with the same version.
-
-        @returns A tuple of (image_name, host_attributes).
-                image_name is the name of image installed, e.g.,
-                veyron_jerry-release/R50-7871.0.0
-                host_attributes is a dictionary of (attribute, value), which
-                can be saved to afe_host_attributes table in database. This
-                method returns a dictionary with a single entry of
-                `job_repo_url`: repo_url, where repo_url is a devserver url to
-                autotest packages.
-        """
-        # Get build from parameter or AFE.
-        # If the build is not a URL, let devserver to stage it first.
-        # Otherwise, choose a devserver to trigger auto-update.
-        build = None
-        devserver = None
-        logging.debug('Resolving a devserver for auto-update')
-        previously_resolved = False
-        if update_url.startswith('http://'):
-            build = autoupdater.url_to_image_name(update_url)
-            previously_resolved = True
-        else:
-            build = update_url
-        devserver = dev_server.resolve(build, self.hostname)
-        server_name = devserver.hostname
-
-        monarch_fields = self._get_au_monarch_fields(devserver, build)
-
-        if previously_resolved:
-            # Make sure devserver for Auto-Update has staged the build.
-            if server_name not in update_url:
-              logging.debug('Resolved to devserver that does not match '
-                            'update_url. The previously resolved devserver '
-                            'must be unhealthy. Switching to use devserver %s,'
-                            ' and re-staging.',
-                            server_name)
-              logging.info('Staging build for AU: %s', update_url)
-              devserver.trigger_download(build, synchronous=False)
-              c = metrics.Counter(
-                  'chromeos/autotest/provision/failover_download')
-              c.increment(fields=monarch_fields)
-        else:
-            logging.info('Staging build for AU: %s', update_url)
-            devserver.trigger_download(build, synchronous=False)
-            c = metrics.Counter('chromeos/autotest/provision/trigger_download')
-            c.increment(fields=monarch_fields)
-
-        # Report provision stats.
-        install_with_dev_counter = metrics.Counter(
-                'chromeos/autotest/provision/install_with_devserver')
-        install_with_dev_counter.increment(fields=monarch_fields)
-        logging.debug('Resolved devserver for auto-update: %s', devserver.url())
-
-        # and other metrics from this function.
-        metrics.Counter('chromeos/autotest/provision/resolve'
-                        ).increment(fields=monarch_fields)
-
-        force_original = self.get_chromeos_release_milestone() is None
-
-        build_re = CONFIG.get_config_value(
-                'CROS', 'quick_provision_build_regex', type=str, default='')
-        quick_provision = (len(build_re) != 0 and
-                           re.match(build_re, build) is not None)
-
-        try:
-            devserver.auto_update(
-                    self.hostname, build,
-                    original_board=self.get_board().replace(
-                            ds_constants.BOARD_PREFIX, ''),
-                    original_release_version=self.get_release_version(),
-                    log_dir=self.job.resultdir,
-                    force_update=True,
-                    full_update=force_full_update,
-                    force_original=force_original,
-                    quick_provision=quick_provision)
-        except dev_server.RetryableProvisionException:
-            # It indicates that last provision failed due to devserver load
-            # issue, so another devserver is resolved to kick off provision
-            # job once again and only once.
-            logging.debug('Provision failed due to devserver issue,'
-                          'retry it with another devserver.')
-
-            # Check first whether this DUT is completely offline. If so, skip
-            # the following provision tries.
-            logging.debug('Checking whether host %s is online.', self.hostname)
-            if utils.ping(self.hostname, tries=1, deadline=1) == 0:
-                self._retry_auto_update_with_new_devserver(
-                        build, devserver, force_full_update,
-                        force_original, quick_provision)
-            else:
-                raise error.AutoservError(
-                        'No answer to ping from %s' % self.hostname)
-
-        # The reason to resolve a new devserver in function machine_install
-        # is mostly because that the update_url there may has a strange format,
-        # and it's hard to parse the devserver url from it.
-        # Since we already resolve a devserver to trigger auto-update, the same
-        # devserver is used to form JOB_REPO_URL here. Verified in local test.
-        repo_url = tools.get_package_url(devserver.url(), build)
-        return build, {ds_constants.JOB_REPO_URL: repo_url}
-
-
     def prepare_for_update(self):
         """Prepares the DUT for an update.
 
@@ -720,25 +531,6 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
         required before updating.
         """
         pass
-
-
-    def machine_install(self, update_url):
-        """Install the image at `update_url` onto the DUT.
-
-        @param update_url: The url used to identify the update image on the
-                devserver.
-
-        @returns A tuple of (image_name, host_attributes).
-                image_name is the name of image installed, e.g.,
-                veyron_jerry-release/R50-7871.0.0
-                host_attributes is a dictionary of (attribute, value), which
-                can be saved to afe_host_attributes table in database. This
-                method returns a dictionary with a single entry of
-                `job_repo_url`: repo_url, where repo_url is a devserver url to
-                autotest packages.
-        """
-        updater = autoupdater.ChromiumOSUpdater(update_url, host=self)
-        return updater.run_update()
 
 
     def _clear_fw_version_labels(self, rw_only):
@@ -941,18 +733,11 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
         `self._repair_strategy` to coordinate the verification and
         repair steps needed to get the DUT working.
         """
+        message = 'Beginning repair for host %s board %s model %s'
+        info = self.host_info_store.get()
+        message %= (self.hostname, info.board, info.model)
+        self.record('INFO', None, None, message)
         self._repair_strategy.repair(self)
-        # Sometimes, hosts with certain ethernet dongles get stuck in a
-        # bad network state where they're reachable from this code, but
-        # not from the devservers during provisioning.  Rebooting the
-        # DUT fixes it.
-        #
-        # TODO(jrbarnette):  Ideally, we'd get rid of the problem
-        # dongles, and drop this code.  Failing that, we could be smart
-        # enough not to reboot if repair rebooted the DUT (e.g. by
-        # looking at DUT uptime after repair completes).
-
-        self.reboot()
 
 
     def close(self):
@@ -1372,6 +1157,10 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
 
     def verify(self):
         """Verify Chrome OS system is in good state."""
+        message = 'Beginning verify for host %s board %s model %s'
+        info = self.host_info_store.get()
+        message %= (self.hostname, info.board, info.model)
+        self.record('INFO', None, None, message)
         self._repair_strategy.verify(self)
 
 
@@ -1941,6 +1730,15 @@ class CrosHost(abstract_ssh.AbstractSSHHost):
             logging.debug("Didn't get number from %s", command)
 
         return ret
+
+
+    def has_hammer(self):
+        """Check whether DUT has hammer device or not.
+
+        @returns boolean whether device has hammer or not
+        """
+        command = 'grep Hammer /sys/bus/usb/devices/*/product'
+        return self.run(command, ignore_status=True).exit_status == 0
 
 
     def is_chrome_switch_present(self, switch):

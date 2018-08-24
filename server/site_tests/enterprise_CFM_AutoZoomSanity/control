@@ -10,9 +10,8 @@ TIME = "SHORT"
 TEST_CATEGORY = "Functional"
 TEST_CLASS = "enterprise"
 TEST_TYPE = "server"
-# TODO(crbug/811186) Disabled since it is constantly failing.
 #ATTRIBUTES = "suite:hotrod"
-DEPENDENCIES = "huddly, mimo"
+DEPENDENCIES = "meet_app, huddly, mimo"
 JOB_RETRIES = 3
 
 DOC = """
