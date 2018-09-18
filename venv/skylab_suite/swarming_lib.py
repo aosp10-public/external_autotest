@@ -14,6 +14,7 @@ import logging
 import operator
 import os
 import urllib
+import uuid
 
 from lucifer import autotest
 
@@ -122,7 +123,45 @@ def _get_client():
 def get_basic_swarming_cmd(command):
     return [_get_client(), command,
             '--auth-service-account-json', SERVICE_ACCOUNT,
-            '--swarming', os.environ.get('SWARMING_SERVER')]
+            '--swarming', get_swarming_server()]
+
+
+def get_logdog_server():
+    """Return the LogDog server for the current environment.
+
+    If the appropriate server cannot be determined, return an empty
+    string.
+    """
+    swarming_server = get_swarming_server()
+    if swarming_server == 'chromium-swarm-dev.appspot.com':
+        return 'luci-logdog-dev.appspot.com'
+    elif swarming_server == 'chrome-swarming.appspot.com':
+        return 'luci-logdog.appspot.com'
+    else:
+        return ''
+
+
+def make_logdog_annotation_url():
+    """Return a unique LogDog annotation URL.
+
+    If the appropriate LogDog server cannot be determined, return an
+    empty string.
+    """
+    logdog_server = get_logdog_server()
+    if not logdog_server:
+        return ''
+    return ('logdog://%s/chromeos/skylab/%s/+/annotations'
+            % (logdog_server, uuid.uuid4().hex))
+
+
+def get_swarming_server():
+    """Return the swarming server for the current environment."""
+    return os.environ.get('SWARMING_SERVER')
+
+
+def get_new_task_swarming_cmd():
+    """Return a list of command args for creating a new task."""
+    return get_basic_swarming_cmd('post') + ['tasks/new']
 
 
 def make_fallback_request_dict(cmds, slices_dimensions, slices_expiration_secs,
@@ -349,3 +388,21 @@ def bot_available(bot):
     @return True if a bot is available to run task, otherwise False.
     """
     return not (bot['is_dead'] or bot['quarantined'])
+
+
+def get_child_tasks(parent_task_id):
+    """Get the child tasks based on a parent swarming task id.
+
+    @param parent_task_id: The parent swarming task id.
+
+    @return a list of dicts, each dict refers to the whole stats of a task,
+        keys include 'name', 'bot_dimensions', 'tags', 'bot_id', 'state', etc.
+    """
+    swarming_cmd = get_basic_swarming_cmd('query')
+    swarming_cmd += ['tasks/list?tags=parent_task_id:%s' % parent_task_id]
+    timeout_util = autotest.chromite_load('timeout_util')
+    cros_build_lib = autotest.chromite_load('cros_build_lib')
+    with timeout_util.Timeout(60):
+        child_tasks = cros_build_lib.RunCommand(
+                swarming_cmd, capture_output=True)
+        return json.loads(child_tasks.output)['items']
