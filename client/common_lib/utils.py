@@ -31,7 +31,6 @@ import socket
 import string
 import struct
 import subprocess
-import sys
 import textwrap
 import threading
 import time
@@ -405,8 +404,10 @@ def open_write_close(filename, data):
 def locate_file(path, base_dir=None):
     """Locates a file.
 
-    @param path: The path of the file being located. Could be absolute or relative
-        path. For relative path, it tries to locate the file from base_dir.
+    @param path: The path of the file being located. Could be absolute or
+        relative path. For relative path, it tries to locate the file from
+        base_dir.
+
     @param base_dir (optional): Base directory of the relative path.
 
     @returns Absolute path of the file if found. None if path is None.
@@ -974,31 +975,6 @@ def signal_pid(pid, sig):
 
     # The process is still alive
     return False
-
-
-def before_force_close(func):
-    """
-    Runs a function before the process is forced close by a catchable signal.
-
-    Allows for the process to cleanup before closing due to a ctrl-c, for
-    example. Note that this does not cause func to be called if the process is
-    closed normally. Something like atexit would be more appropriate in such a
-    situation.
-
-    @param func function taking no arguments to be called prior to being killed
-    """
-    def sig_handler(signum, frame):
-        logging.info('Catching signal: %d' % signum)
-        func()
-
-    catch_signals = [signal.SIGINT]
-    if sys.platform == 'win32':
-        catch_signals.extend([signal.CTRL_C_EVENT,
-                              signal.CTRL_BREAK_EVENT,
-                              signal.SIGBREAK])
-    else:
-        catch_signals.append(signal.SIGTERM)
-    map(lambda x: signal.signal(x, sig_handler), catch_signals)
 
 
 def nuke_subprocess(subproc):
@@ -1929,19 +1905,20 @@ WIRELESS_SSID_PATTERN = 'wireless_ssid_(.*)/(\d+)'
 
 
 def get_moblab_serial_number():
-    """Gets the moblab public network interface.
+    """Gets a unique identifier for the moblab.
 
-    If the eth0 is an USB interface, try to use eth1 instead. Otherwise
-    use eth0 by default.
+    Serial number is the prefered identifier, use it if
+    present, however fallback is the ethernet mac address.
     """
-    try:
-        cmd_result = run('sudo vpd -g serial_number')
-        if cmd_result.stdout:
-          return cmd_result.stdout
-    except error.CmdError as e:
-        logging.error(str(e))
-        logging.info('Serial number ')
-        pass
+    for vpd_key in ['serial_number', 'ethernet_mac']:
+      try:
+          cmd_result = run('sudo vpd -g %s' % vpd_key)
+          if cmd_result and cmd_result.stdout:
+            return cmd_result.stdout
+      except error.CmdError as e:
+          logging.error(str(e))
+          logging.info(vpd_key)
+          pass
     return 'NoSerialNumber'
 
 
@@ -2090,14 +2067,15 @@ def get_offload_gsuri():
     @returns gsuri to offload test results to.
     """
     # For non-moblab, use results_storage_server or default.
-    if not is_moblab():
+    if not is_moblab():  # pylint: disable=undefined-variable
         return DEFAULT_OFFLOAD_GSURI
 
     # For moblab, use results_storage_server or image_storage_server as bucket
     # name and mac-address/moblab_id as path.
     gsuri = DEFAULT_OFFLOAD_GSURI
     if not gsuri:
-        gsuri = "%sresults/" % CONFIG.get_config_value('CROS', 'image_storage_server')
+        gsuri = "%sresults/" % CONFIG.get_config_value('CROS',
+                                                       'image_storage_server')
 
     return '%s%s/%s/' % (gsuri, get_moblab_serial_number(), get_moblab_id())
 
@@ -2401,7 +2379,8 @@ def restart_service(service_name, ignore_status=True):
 
     @return: status code of the executed command.
     """
-    return control_service(service_name, action='restart', ignore_status=ignore_status)
+    return control_service(service_name, action='restart',
+                           ignore_status=ignore_status)
 
 
 def start_service(service_name, ignore_status=True):
@@ -2413,7 +2392,8 @@ def start_service(service_name, ignore_status=True):
 
     @return: status code of the executed command.
     """
-    return control_service(service_name, action='start', ignore_status=ignore_status)
+    return control_service(service_name, action='start',
+                           ignore_status=ignore_status)
 
 
 def stop_service(service_name, ignore_status=True):
@@ -2425,7 +2405,8 @@ def stop_service(service_name, ignore_status=True):
 
     @return: status code of the executed command.
     """
-    return control_service(service_name, action='stop', ignore_status=ignore_status)
+    return control_service(service_name, action='stop',
+                           ignore_status=ignore_status)
 
 
 def sudo_require_password():
@@ -2682,8 +2663,71 @@ def which(exec_file):
 
 
 class TimeoutError(error.TestError):
-    """Error raised when we time out when waiting on a condition."""
-    pass
+    """Error raised when poll_for_condition() failed to poll within time.
+
+    It may embed a reason (either a string or an exception object) so that
+    the caller of poll_for_condition() can handle failure better.
+    """
+
+    def __init__(self, message=None, reason=None):
+        """Constructor.
+
+        It supports three invocations:
+        1) TimeoutError()
+        2) TimeoutError(message): with customized message.
+        3) TimeoutError(message, reason): with message and reason for timeout.
+        """
+        self.reason = reason
+        if self.reason:
+            reason_str = 'Reason: ' + repr(self.reason)
+            if message:
+                message += '. ' + reason_str
+            else:
+                message = reason_str
+
+        if message:
+            super(TimeoutError, self).__init__(message)
+        else:
+            super(TimeoutError, self).__init__()
+
+
+class Timer(object):
+    """A synchronous timer to evaluate if timout is reached.
+
+    Usage:
+      timer = Timer(timeout_sec)
+      while timer.sleep(sleep_interval):
+        # do something...
+    """
+    def __init__(self, timeout):
+        """Constructor.
+
+        Note that timer won't start until next() is called.
+
+        @param timeout: timer timeout in seconds.
+        """
+        self.timeout = timeout
+        self.deadline = 0
+
+    def sleep(self, interval):
+        """Checks if it has sufficient time to sleep; sleeps if so.
+
+        It blocks for |interval| seconds if it has time to sleep.
+        If timer is not ticked yet, kicks it off and returns True without
+        sleep.
+
+        @param interval: sleep interval in seconds.
+        @return True if it has sleeped or just kicked off the timer. False
+                otherwise.
+        """
+        now = time.time()
+        if not self.deadline:
+            self.deadline = now + self.timeout
+            return True
+        if now + interval < self.deadline:
+            time.sleep(interval)
+            return True
+        return False
 
 
 def poll_for_condition(condition,
@@ -2721,9 +2765,48 @@ def poll_for_condition(condition,
             else:
                 desc = 'Timed out waiting for unnamed condition'
             logging.error(desc)
-            raise TimeoutError(desc)
+            raise TimeoutError(message=desc)
 
         time.sleep(sleep_interval)
+
+
+def poll_for_condition_ex(condition, timeout=10, sleep_interval=0.1, desc=None):
+    """Polls until a condition is evaluated to true or until timeout.
+
+    Similiar to poll_for_condition, except that it handles exceptions
+    condition() raises. If timeout is not reached, the exception is dropped and
+    poll for condition after a sleep; otherwise, the exception is embedded into
+    TimeoutError to raise.
+
+    @param condition: function taking no args and returning anything that will
+                      evaluate to True in a conditional check
+    @param timeout: maximum number of seconds to wait
+    @param sleep_interval: time to sleep between polls
+    @param desc: description of the condition
+
+    @return The evaluated value that caused the poll loop to terminate.
+
+    @raise TimeoutError. If condition() raised exception, it is embedded in
+           raised TimeoutError.
+    """
+    timer = Timer(timeout)
+    while timer.sleep(sleep_interval):
+        reason = None
+        try:
+            value = condition()
+            if value:
+                return value
+        except BaseException as e:
+            reason = e
+
+    if desc is None:
+        desc = 'unamed condition'
+    if reason is None:
+        reason = 'condition evaluted as false'
+    to_raise = TimeoutError(message='Timed out waiting for ' + desc,
+                            reason=reason)
+    logging.error(str(to_raise))
+    raise to_raise
 
 
 def threaded_return(function):

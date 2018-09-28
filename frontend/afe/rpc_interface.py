@@ -1975,24 +1975,6 @@ def create_suite_job(
     if suite_args is None:
         suite_args = dict()
 
-    # TODO(crbug.com/758427): suite_args_raw is needed to run old tests.
-    # Can be removed after R64.
-    if 'tests' in suite_args:
-        # TODO(crbug.com/758427): test_that used to have its own
-        # snowflake implementation of parsing command line arguments in
-        # the test
-        suite_args_raw = ' '.join([':lab:'] + suite_args['tests'])
-    # TODO(crbug.com/760675): Needed for CTS/GTS as above, but when
-    # 'tests' is not passed.  Can be removed after R64.
-    elif name.rpartition('/')[-1] in {'control.cts_N',
-                                      'control.cts_N_preconditions',
-                                      'control.gts'}:
-        suite_args_raw = ''
-    else:
-        # TODO(crbug.com/758427): This is for suite_attr_wrapper.  Can
-        # be removed after R64.
-        suite_args_raw = repr(suite_args)
-
     inject_dict = {
         'board': board,
         # `build` is needed for suites like AU to stage image inside suite
@@ -2007,9 +1989,6 @@ def create_suite_job(
         'timeout_mins': timeout_mins,
         'devserver_url': ds.url(),
         'priority': priority,
-        # TODO(crbug.com/758427): injecting suite_args is needed to run
-        # old tests
-        'suite_args' : suite_args_raw,
         'wait_for_results': wait_for_results,
         'job_retry': job_retry,
         'max_retries': max_retries,
@@ -2309,14 +2288,17 @@ def get_stable_version(board=stable_version_utils.DEFAULT, android=False):
     """Get stable version for the given board.
 
     @param board: Name of the board.
-    @param android: If True, the given board is an Android-based device. If
-                    False, assume its a Chrome OS-based device.
+    @param android: Unused legacy parameter.  This is maintained for the
+            sake of clients on old branches that still pass the
+            parameter.  TODO(jrbarnette) Remove this completely once R68
+            drops off stable.
 
     @return: Stable version of the given board. Return global configure value
              of CROS.stable_cros_version if stable_versinos table does not have
              entry of board DEFAULT.
     """
-    return stable_version_utils.get(board=board, android=android)
+    assert not android, 'get_stable_version no longer supports `android`.'
+    return stable_version_utils.get(board=board)
 
 
 @rpc_utils.route_rpc_to_master

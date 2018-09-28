@@ -2,11 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import datetime
 import logging
 import os
+import re
+import shutil
 import time
 
 from autotest_lib.client.common_lib import error
+from autotest_lib.client.common_lib import utils
+
+
+_DEFAULT_RUN = utils.run
+_DEFAULT_COPY = shutil.copy
 
 class UpdateEngineUtil(object):
     """Utility code shared between client and server update_engine autotests"""
@@ -34,6 +42,28 @@ class UpdateEngineUtil(object):
     # Public key used to force update_engine to verify omaha response data on
     # test images.
     _IMAGE_PUBLIC_KEY = 'LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFxZE03Z25kNDNjV2ZRenlydDE2UQpESEUrVDB5eGcxOE9aTys5c2M4aldwakMxekZ0b01Gb2tFU2l1OVRMVXArS1VDMjc0ZitEeElnQWZTQ082VTVECkpGUlBYVXp2ZTF2YVhZZnFsalVCeGMrSlljR2RkNlBDVWw0QXA5ZjAyRGhrckduZi9ya0hPQ0VoRk5wbTUzZG8Kdlo5QTZRNUtCZmNnMUhlUTA4OG9wVmNlUUd0VW1MK2JPTnE1dEx2TkZMVVUwUnUwQW00QURKOFhtdzRycHZxdgptWEphRm1WdWYvR3g3K1RPbmFKdlpUZU9POUFKSzZxNlY4RTcrWlppTUljNUY0RU9zNUFYL2xaZk5PM1JWZ0cyCk83RGh6emErbk96SjNaSkdLNVI0V3daZHVobjlRUllvZ1lQQjBjNjI4NzhxWHBmMkJuM05wVVBpOENmL1JMTU0KbVFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=='
+
+
+    def __init__(self, run_func=_DEFAULT_RUN, get_file=_DEFAULT_COPY):
+        """
+        Initialize this class.
+
+        @param run_func: the function to use to run commands on the client.
+                         Defaults for use by client tests, but can be
+                         overwritten to run remotely from a server test.
+        @param get_file: the function to use when copying a file.  Defaults
+                         for use by client tests.  Called with
+                         (file, destination) syntax.
+
+        """
+        self._create_update_engine_variables(run_func, get_file)
+
+
+    def _create_update_engine_variables(self, run_func=_DEFAULT_RUN,
+                                        get_file=_DEFAULT_COPY):
+        """See __init__()."""
+        self._run = run_func
+        self._get_file = get_file
 
 
     def _wait_for_progress(self, progress):
@@ -67,11 +97,15 @@ class UpdateEngineUtil(object):
             if not status:
                 continue
             if self._UPDATE_STATUS_IDLE == status[self._CURRENT_OP]:
+                err_str = self._get_last_error_string()
                 raise error.TestFail('Update status was idle while trying to '
-                                     'get download status.')
+                                     'get download status. Last error: %s' %
+                                     err_str)
             if self._UPDATE_STATUS_REPORTING_ERROR_EVENT == status[
                 self._CURRENT_OP]:
-                raise error.TestFail('Update status reported error.')
+                err_str = self._get_last_error_string()
+                raise error.TestFail('Update status reported error: %s' %
+                                     err_str)
             if self._UPDATE_STATUS_UPDATED_NEED_REBOOT == status[
                 self._CURRENT_OP]:
                 raise error.TestFail('Update status was NEEDS_REBOOT while '
@@ -90,12 +124,14 @@ class UpdateEngineUtil(object):
         while True:
             if self._check_update_engine_log_for_entry('Reached max attempts ',
                                                        raise_error=False):
-                break
+                logging.debug('Found log entry for failed update.')
+                if self._is_update_engine_idle():
+                    break
             time.sleep(1)
+            self._get_update_engine_status()
             if time.time() > timeout:
                 raise error.TestFail('Update did not fail as expected. Timeout'
                                      ': %d minutes.' % timeout_minutes)
-
 
 
     def _wait_for_update_to_complete(self, finalizing_ok=False):
@@ -133,6 +169,8 @@ class UpdateEngineUtil(object):
         if status is None:
             return None
         logging.debug(status)
+        if status.exit_status != 0:
+            return None
         status_dict = {}
         for line in status.stdout.splitlines():
             entry = line.partition('=')
@@ -173,6 +211,19 @@ class UpdateEngineUtil(object):
             else:
                 return False
         return True
+
+
+    def _is_update_finished_downloading(self):
+        """Checks if the update has moved to the final stages."""
+        s = self._get_update_engine_status()
+        return s[self._CURRENT_OP] in [self._UPDATE_ENGINE_FINALIZING,
+                                       self._UPDATE_STATUS_UPDATED_NEED_REBOOT]
+
+
+    def _is_update_engine_idle(self):
+        """Checks if the update engine is idle."""
+        status = self._get_update_engine_status()
+        return status[self._CURRENT_OP] == self._UPDATE_STATUS_IDLE
 
 
     def _update_continued_where_it_left_off(self, progress):
@@ -239,3 +290,114 @@ class UpdateEngineUtil(object):
                           self._UPDATE_ENGINE_LOG_DIR).stdout.splitlines()
         return self._run('cat %s%s' % (self._UPDATE_ENGINE_LOG_DIR,
                                        files[1])).stdout
+
+
+    def _create_custom_lsb_release(self, update_url, build='0.0.0.0'):
+        """
+        Create a custom lsb-release file.
+
+        In order to tell OOBE to ping a different update server than the
+        default we need to create our own lsb-release. We will include a
+        deserver update URL.
+
+        @param update_url: String of url to use for update check.
+        @param build: String of the build number to use. Represents the
+                      Chrome OS build this device thinks it is on.
+
+        """
+        self._run('mkdir %s' % os.path.dirname(self._CUSTOM_LSB_RELEASE),
+                  ignore_status=True)
+        self._run('touch %s' % self._CUSTOM_LSB_RELEASE)
+        self._run('echo CHROMEOS_RELEASE_VERSION=%s > %s' %
+                  (build, self._CUSTOM_LSB_RELEASE))
+        self._run('echo CHROMEOS_AUSERVER=%s >> %s' %
+                  (update_url, self._CUSTOM_LSB_RELEASE))
+
+
+    def _clear_custom_lsb_release(self):
+        """
+        Delete the custom release file, if any.
+
+        Intended to clear work done by _create_custom_lsb_release().
+
+        """
+        self._run('rm %s' % self._CUSTOM_LSB_RELEASE, ignore_status=True)
+
+
+    def _get_update_requests(self):
+        """
+        Get the contents of all the update requests from the most recent log.
+
+        @returns: a sequential list of <request> xml blocks or None if none.
+
+        """
+        update_log = ''
+        with open(self._UPDATE_ENGINE_LOG) as fh:
+            update_log = fh.read()
+
+        # Matches <request> ... </request>.  The match can be on multiple
+        # lines and the search is not greedy so it only matches one block.
+        return re.findall(r'<request>.?</request>', update_log, re.DOTALL)
+
+
+    def _get_time_of_last_update_request(self):
+        """
+        Get the time of the last update request from most recent logfile.
+
+        @returns: seconds since epoch of when last update request happened
+                  (second accuracy), or None if no such timestamp exists.
+
+        """
+        update_log = ''
+        with open(self._UPDATE_ENGINE_LOG) as fh:
+            update_log = fh.read()
+
+        # Matches any single line with "MMDD/HHMMSS ... Request ... xml", e.g.
+        # "[0723/133526:INFO:omaha_request_action.cc(794)] Request: <?xml".
+        result = re.findall(r'([0-9]{4}/[0-9]{6}).*Request.*xml', update_log)
+        if not result:
+            return None
+
+        LOG_TIMESTAMP_FORMAT = '%m%d/%H%M%S'
+        match = result[-1]
+
+        # The log does not include the year, so set it as this year.
+        # This assumption could cause incorrect behavior, but is unlikely to.
+        current_year = datetime.datetime.now().year
+        log_datetime = datetime.datetime.strptime(match, LOG_TIMESTAMP_FORMAT)
+        log_datetime = log_datetime.replace(year=current_year)
+
+        return time.mktime(log_datetime.timetuple())
+
+
+    def _take_screenshot(self, filename):
+        """
+        Take a screenshot and save in resultsdir.
+
+        @param filename: The name of the file to save
+
+        """
+        try:
+            file_location = os.path.join('/tmp', filename)
+            self._host.run('screenshot %s' % file_location)
+            self._host.get_file(file_location, self.resultsdir)
+        except error.AutoservRunError:
+            logging.exception('Failed to take screenshot.')
+
+
+    def _get_last_error_string(self):
+        """
+        Gets the last error message in the update engine log.
+
+        @returns: The error message.
+
+        """
+        err_str = 'Updating payload state for error code'
+        log = self._run('cat %s' % self._UPDATE_ENGINE_LOG).stdout.split()
+        targets = [line for line in log if err_str in line]
+        logging.debug('Error lines found: %s', targets)
+        if not targets:
+          return None
+        else:
+          return targets[-1].rpartition(':')[2]
+

@@ -57,7 +57,7 @@ class server(topic_common.atest):
     topic = msg_topic = 'server'
     msg_items = '<server>'
 
-    def __init__(self, hostname_required=True):
+    def __init__(self, hostname_required=True, allow_multiple_hostname=False):
         """Add to the parser the options common to all the server actions.
 
         @param hostname_required: True to require the command has hostname
@@ -79,12 +79,13 @@ class server(topic_common.atest):
                                default=False,
                                metavar='ACTION')
 
-        self.add_skylab_options()
+        self.add_skylab_options(enforce_skylab=True)
 
         self.topic_parse_info = topic_common.item_parse_info(
                 attribute_name='hostname', use_leftover=True)
 
         self.hostname_required = hostname_required
+        self.allow_multiple_hostname = allow_multiple_hostname
 
 
     def parse(self):
@@ -103,13 +104,21 @@ class server(topic_common.atest):
 
         # self.hostname is a list. Action on server only needs one hostname at
         # most.
-        if ((not self.hostname and self.hostname_required) or
+        if (not self.hostname and self.hostname_required):
+            self.invalid_syntax('`server` topic requires hostname. '
+                                'Use -h to see available options.')
+
+        if (self.hostname_required and not self.allow_multiple_hostname and
             len(self.hostname) > 1):
             self.invalid_syntax('`server` topic can only manipulate 1 server. '
                                 'Use -h to see available options.')
+
         if self.hostname:
-            # Override self.hostname with the first hostname in the list.
-            self.hostname = self.hostname[0]
+            if not self.allow_multiple_hostname or not self.skylab:
+                # Only support create multiple servers in skylab.
+                # Override self.hostname with the first hostname in the list.
+                self.hostname = self.hostname[0]
+
         self.role = options.role
 
         if self.skylab and self.role:
@@ -142,27 +151,11 @@ class server_list(action_common.atest_list, server):
         """
         super(server_list, self).__init__(hostname_required=False)
 
-        self.parser.add_option('-t', '--table',
-                               help=('List details of all servers in a table, '
-                                     'e.g., \tHostname | Status  | Roles     | '
-                                     'note\t\tserver1  | primary | scheduler | '
-                                     'lab. %s' %
-                                     skylab_utils.MSG_INVALID_IN_SKYLAB),
-                               action='store_true',
-                               default=False)
         self.parser.add_option('-s', '--status',
                                help='Only show servers with given status.',
                                type='string',
                                default=None,
                                metavar='STATUS')
-        self.parser.add_option('-u', '--summary',
-                               help=('Show the summary of roles and status '
-                                     'only, e.g.,\tscheduler: server1(primary) '
-                                     'server2(backup)\t\tdrone: server3(primary'
-                                     ') server4(backup). %s' %
-                                     skylab_utils.MSG_INVALID_IN_SKYLAB),
-                               action='store_true',
-                               default=False)
         self.parser.add_option('--json',
                                help=('Format output as JSON.'),
                                action='store_true',
@@ -171,6 +164,7 @@ class server_list(action_common.atest_list, server):
                                help=('Only return hostnames.'),
                                action='store_true',
                                default=False)
+        # TODO(crbug.com/850344): support '--table' and '--summary' formats.
 
 
     def parse(self):
@@ -178,17 +172,10 @@ class server_list(action_common.atest_list, server):
         """
         (options, leftover) = super(server_list, self).parse()
         self.json = options.json
-        self.table = options.table
         self.status = options.status
-        self.summary = options.summary
         self.namesonly = options.hostnames_only
 
-        # TODO(nxia): support all formats for skylab inventory.
-        if (self.skylab and (self.table or self.summary)):
-            self.invalid_syntax('The format (table|summary)'
-                                ' is not supported with --skylab.')
-
-        if sum([self.table, self.summary, self.json, self.namesonly]) > 1:
+        if sum([self.json, self.namesonly]) > 1:
             self.invalid_syntax('May only specify up to 1 output-format flag.')
         return (options, leftover)
 
@@ -249,10 +236,6 @@ class server_list(action_common.atest_list, server):
                     formatter = skylab_server.format_servers_json
                 else:
                     formatter = server_manager_utils.format_servers_json
-            elif self.table:
-                formatter = server_manager_utils.format_servers_table
-            elif self.summary:
-                formatter = server_manager_utils.format_servers_summary
             elif self.namesonly:
                 formatter = server_manager_utils.format_servers_nameonly
             else:
@@ -271,7 +254,7 @@ class server_create(server):
     def __init__(self):
         """Initializer.
         """
-        super(server_create, self).__init__()
+        super(server_create, self).__init__(allow_multiple_hostname=True)
         self.parser.add_option('-n', '--note',
                                help='note of the server',
                                type='string',
@@ -299,12 +282,14 @@ class server_create(server):
         data_dir = inventory_repo.get_data_dir()
         infrastructure = text_manager.load_infrastructure(data_dir)
 
-        new_server = skylab_server.create(
-                infrastructure,
-                self.hostname,
-                self.environment,
-                role=self.role,
-                note=self.note)
+        new_servers = []
+        for hostname in self.hostname:
+            new_servers.append(skylab_server.create(
+                    infrastructure,
+                    hostname,
+                    self.environment,
+                    role=self.role,
+                    note=self.note))
         text_manager.dump_infrastructure(data_dir, infrastructure)
 
         message = skylab_utils.construct_commit_message(
@@ -313,7 +298,7 @@ class server_create(server):
                 message, draft=self.draft, dryrun=self.dryrun,
                 submit=self.submit)
 
-        return new_server
+        return new_servers
 
 
     def execute(self):

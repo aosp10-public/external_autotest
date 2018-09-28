@@ -2,9 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import collections, ctypes, fcntl, glob, logging, math, numpy, os, re, struct
-import threading, time
+import collections
 import contextlib
+import ctypes
+import fcntl
+import glob
+import json
+import logging
+import math
+import numpy
+import os
+import re
+import struct
+import threading
+import time
 
 from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error, enum
@@ -946,17 +957,19 @@ class GPUFreqStats(AbstractStats):
 
     _MALI_DEV = '/sys/class/misc/mali0/device'
     _MALI_EVENTS = ['mali_dvfs:mali_dvfs_set_clock']
-    _MALI_TRACE_CLK_RE = r'(\d+.\d+): mali_dvfs_set_clock: frequency=(\d+)\d{6}'
+    _MALI_TRACE_CLK_RE = \
+            r'kworker.* (\d+\.\d+): mali_dvfs_set_clock: frequency=(\d+)\d{6}'
 
     _I915_ROOT = '/sys/kernel/debug/dri/0'
     _I915_EVENTS = ['i915:intel_gpu_freq_change']
-    _I915_CLK = os.path.join(_I915_ROOT, 'i915_cur_delayinfo')
-    _I915_TRACE_CLK_RE = r'(\d+.\d+): intel_gpu_freq_change: new_freq=(\d+)'
+    _I915_CLKS_FILES = ['i915_cur_delayinfo', 'i915_frequency_info']
+    _I915_TRACE_CLK_RE = \
+            r'kworker.* (\d+\.\d+): intel_gpu_freq_change: new_freq=(\d+)'
     _I915_CUR_FREQ_RE = r'CAGF:\s+(\d+)MHz'
     _I915_MIN_FREQ_RE = r'Lowest \(RPN\) frequency:\s+(\d+)MHz'
     _I915_MAX_FREQ_RE = r'Max non-overclocked \(RP0\) frequency:\s+(\d+)MHz'
-    # TODO(dbasehore) parse this from debugfs if/when this value is added
-    _I915_FREQ_STEP = 50
+    # There are 6 frequency steps per 100 MHz
+    _I915_FREQ_STEPS = [0, 17, 33, 50, 67, 83]
 
     _gpu_type = None
 
@@ -1007,6 +1020,7 @@ class GPUFreqStats(AbstractStats):
         max_mhz = None
         cur_mhz = None
         events = None
+        i915_path = None
         self._freqs = []
         self._prev_sample = None
         self._trace = None
@@ -1014,12 +1028,17 @@ class GPUFreqStats(AbstractStats):
         if os.path.exists(self._MALI_DEV) and \
            not os.path.exists(os.path.join(self._MALI_DEV, "devfreq")):
             self._set_gpu_type('mali')
-        elif os.path.exists(self._I915_CLK):
-            self._set_gpu_type('i915')
         else:
-            # We either don't know how to track GPU stats (yet) or the stats are
-            # tracked in DevFreqStats.
-            self._set_gpu_type(None)
+            for file_name in self._I915_CLKS_FILES:
+                full_path = os.path.join(self._I915_ROOT, file_name)
+                if os.path.exists(full_path):
+                    self._set_gpu_type('i915')
+                    i915_path = full_path
+                    break
+            else:
+                # We either don't know how to track GPU stats (yet) or the stats
+                # are tracked in DevFreqStats.
+                self._set_gpu_type(None)
 
         logging.debug("gpu_type is %s", self._gpu_type)
 
@@ -1032,7 +1051,7 @@ class GPUFreqStats(AbstractStats):
 
         elif self._gpu_type is 'i915':
             events = self._I915_EVENTS
-            with open(self._I915_CLK) as fd:
+            with open(i915_path) as fd:
                 for ln in fd.readlines():
                     logging.debug("ln = %s", ln)
                     result = re.findall(self._I915_CUR_FREQ_RE, ln)
@@ -1048,9 +1067,9 @@ class GPUFreqStats(AbstractStats):
                         max_mhz = result[0]
                         continue
                 if min_mhz and max_mhz:
-                    for i in xrange(int(min_mhz), int(max_mhz) +
-                                    self._I915_FREQ_STEP, self._I915_FREQ_STEP):
-                        self._freqs.append(str(i))
+                    for i in xrange(int(min_mhz), int(max_mhz) + 1):
+                        if i % 100 in self._I915_FREQ_STEPS:
+                            self._freqs.append(str(i))
 
         logging.debug("cur_mhz = %s, min_mhz = %s, max_mhz = %s", cur_mhz,
                       min_mhz, max_mhz)
@@ -1150,6 +1169,10 @@ class GPUFreqStats(AbstractStats):
               spent at that frequency.
         """
         return self._trace_read_stats(self._I915_TRACE_CLK_RE)
+
+
+    def _supports_automatic_weighted_average(self):
+        return self._gpu_type is not None
 
 
 class USBSuspendStats(AbstractStats):
@@ -1418,10 +1441,11 @@ class MeasurementLogger(threading.Thread):
 
     Private attributes:
        _measurements: list of Measurement objects to be sampled.
-       _checkpoint_data: list of tuples.  Tuple contains:
-           tname: String of testname associated with this time interval
-           tstart: Float of time when subtest started
-           tend: Float of time when subtest ended
+       _checkpoint_data: dictionary of (tname, tlist).
+           tname: String of testname associated with these time intervals
+           tlist: list of tuples.  Tuple contains:
+               tstart: Float of time when subtest started
+               tend: Float of time when subtest ended
        _results: list of results tuples.  Tuple contains:
            prefix: String of subtest
            mean: Float of mean  in watts
@@ -1429,6 +1453,8 @@ class MeasurementLogger(threading.Thread):
            tstart: Float of time when subtest started
            tend: Float of time when subtest ended
     """
+    CHECKPOINT_LOG_DEFAULT_FNAME = 'checkpoint_log.json'
+
     def __init__(self, measurements, seconds_period=1.0):
         """Initialize a logger.
 
@@ -1442,7 +1468,7 @@ class MeasurementLogger(threading.Thread):
 
         self.readings = []
         self.times = []
-        self._checkpoint_data = []
+        self._checkpoint_data = collections.defaultdict(list)
 
         self.domains = []
         self._measurements = measurements
@@ -1502,7 +1528,7 @@ class MeasurementLogger(threading.Thread):
             tstart = self.times[0]
         if not tend:
             tend = time.time()
-        self._checkpoint_data.append((tname, tstart, tend))
+        self._checkpoint_data[tname].append((tstart, tend))
         logging.info('Finished test "%s" between timestamps [%s, %s]',
                      tname, tstart, tend)
 
@@ -1543,23 +1569,29 @@ class MeasurementLogger(threading.Thread):
             meas = numpy.array(domain_readings)
             domain = self.domains[i]
 
-            for tname, tstart, tend in self._checkpoint_data:
+            for tname, tlist in self._checkpoint_data.iteritems():
                 if tname:
                     prefix = '%s_%s' % (tname, domain)
                 else:
                     prefix = domain
-                keyvals[prefix+'_duration'] = tend - tstart
-                # Select all readings taken between tstart and tend timestamps.
-                # Try block just in case
-                # code.google.com/p/chromium/issues/detail?id=318892
-                # is not fixed.
-                try:
-                    meas_array = meas[numpy.bitwise_and(tstart < t, t < tend)]
-                except ValueError, e:
-                    logging.debug('Error logging measurements: %s', str(e))
-                    logging.debug('timestamps %d %s', t.len, t)
-                    logging.debug('timestamp start, end %f %f', tstart, tend)
-                    logging.debug('measurements %d %s', meas.len, meas)
+                keyvals[prefix+'_duration'] = 0
+                # Select all readings taken between tstart and tend
+                # timestamps in tlist.
+                masks = []
+                for tstart, tend in tlist:
+                    keyvals[prefix+'_duration'] += tend - tstart
+                    # Try block just in case
+                    # code.google.com/p/chromium/issues/detail?id=318892
+                    # is not fixed.
+                    try:
+                        masks.append(numpy.logical_and(tstart < t, t < tend))
+                    except ValueError, e:
+                        logging.debug('Error logging measurements: %s', str(e))
+                        logging.debug('timestamps %d %s', t.len, t)
+                        logging.debug('timestamp start, end %f %f', tstart, tend)
+                        logging.debug('measurements %d %s', meas.len, meas)
+                mask = numpy.logical_or.reduce(masks)
+                meas_array = meas[mask]
 
                 # If sub-test terminated early, avoid calculating avg, std and
                 # min
@@ -1569,8 +1601,11 @@ class MeasurementLogger(threading.Thread):
                 meas_std = meas_array.std()
 
                 # Results list can be used for pretty printing and saving as csv
-                results.append((prefix, meas_mean, meas_std,
-                                tend - tstart, tstart, tend))
+                # TODO(seankao): new results format?
+                result = (prefix, meas_mean, meas_std)
+                for tstart, tend in tlist:
+                    result = result + (tend - tstart, tstart, tend)
+                results.append(result)
                 keyvals[prefix + '_' + mtype] = list(meas_array)
                 keyvals[prefix + '_' + mtype + '_avg'] = meas_mean
                 keyvals[prefix + '_' + mtype + '_cnt'] = meas_array.size
@@ -1600,6 +1635,32 @@ class MeasurementLogger(threading.Thread):
                 f.write(line + '\n')
 
 
+    def save_checkpoint_data(self, resultsdir, fname=CHECKPOINT_LOG_DEFAULT_FNAME):
+        """Save checkpoint data.
+
+        Args:
+            resultsdir: String, directory to write results to
+            fname: String, name of file to write results to
+        """
+        fname = os.path.join(resultsdir, fname)
+        with file(fname, 'wt') as f:
+            json.dump(self._checkpoint_data, f, indent=4, separators=(',', ': '))
+
+
+    @staticmethod
+    def load_checkpoint_data(resultsdir, fname=CHECKPOINT_LOG_DEFAULT_FNAME):
+        """Load checkpoint data.
+
+        Args:
+            resultsdir: String, directory to load results from
+            fname: String, name of file to load results from
+        """
+        fname = os.path.join(resultsdir, fname)
+        with file(fname, 'r') as f:
+            checkpoint_data = json.load(f)
+        return checkpoint_data
+
+
 class CPUStatsLogger(MeasurementLogger):
     """Class to measure CPU Frequency and CPU Idle Stats.
 
@@ -1626,6 +1687,7 @@ class CPUStatsLogger(MeasurementLogger):
         super(CPUStatsLogger, self).__init__([], seconds_period)
 
         self._stats = get_avaliable_cpu_stats()
+        self._stats.append(GPUFreqStats())
         self.domains = []
         for stat in self._stats:
             self.domains.extend([stat.name + '_' + str(state_name)
@@ -1643,15 +1705,17 @@ class CPUStatsLogger(MeasurementLogger):
             ret.extend(stat.refresh().values())
             wavg = stat.weighted_average()
             if wavg:
-                last_wavg = self._last_wavg[stat.name]
-                self._last_wavg[stat.name] = wavg
-
-                # Calculate weight average in this period using current total
-                # weight average and last total weight average.
-                # The result will lose some precision with higher number of
-                # count but still good enough for 11 significant digits even if
-                # we logged the data every 1 second for a day.
-                ret.append(wavg * count - last_wavg * (count - 1))
+                if stat.incremental:
+                    last_wavg = self._last_wavg[stat.name]
+                    self._last_wavg[stat.name] = wavg
+                    # Calculate weight average in this period using current
+                    # total weight average and last total weight average.
+                    # The result will lose some precision with higher number of
+                    # count but still good enough for 11 significant digits even
+                    # if we logged the data every 1 second for a day.
+                    ret.append(wavg * count - last_wavg * (count - 1))
+                else:
+                    ret.append(wavg)
         return ret
 
     def save_results(self, resultsdir, fname=None):

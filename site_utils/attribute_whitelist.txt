@@ -4,6 +4,7 @@ subsystem:wifi
 suite:AFDO_page_replay
 suite:AFDO_record
 suite:another_suite
+suite:app-compat
 suite:arc-bvt-perbuild
 suite:arc-cts
 suite:arc-cts-beta
@@ -87,7 +88,6 @@ suite:dummy
 suite:dummy_server
 suite:dummy_server_nossp
 suite:dummyclientretries
-suite:dummyflake
 suite:ent-nightly
 suite:ent-perbuild
 suite:ent-wificell
@@ -174,6 +174,7 @@ suite:sanity
 suite:sb65-presubmit
 suite:security
 suite:security_weekly
+suite:skylab_staging_test
 suite:smoke
 suite:something_else
 suite:ssdqual

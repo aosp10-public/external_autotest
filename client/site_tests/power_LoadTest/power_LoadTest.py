@@ -7,6 +7,7 @@ import logging
 import numpy
 import os
 import time
+import json
 
 from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import error
@@ -268,13 +269,16 @@ class power_LoadTest(arc.ArcTest):
         self._plog = power_status.PowerLogger(measurements, seconds_period=20)
         self._tlog = power_status.TempLogger([], seconds_period=20)
         self._clog = power_status.CPUStatsLogger(seconds_period=20)
-        self._plog.start()
-        self._tlog.start()
-        self._clog.start()
+        self._meas_logs = [self._plog, self._tlog, self._clog]
+        for log in self._meas_logs:
+            log.start()
         if self._log_mem_bandwidth:
             self._mlog = memory_bandwidth_logger.MemoryBandwidthLogger(
                 raw=False, seconds_period=2)
             self._mlog.start()
+
+        # record start time and end time for each task
+        self._task_tracker = []
 
         ext_path = os.path.join(os.path.dirname(__file__), 'extension')
         self._tmp_keyvals['username'] = self._username
@@ -328,13 +332,14 @@ class power_LoadTest(arc.ArcTest):
                 handler_func=(lambda handler, forms, loop_counter=i:\
                     _extension_log_handler(handler, forms, loop_counter)))
 
-            pagelt_tracking = self._testServer.add_wait_url(url='/pagelt')
+            pagetime_tracking = self._testServer.add_wait_url(url='/pagetime')
 
-            self._testServer.add_url_handler(url='/pagelt',\
-                handler_func=(lambda handler, forms, tracker=self,
+            self._testServer.add_url_handler(url='/pagetime',\
+                handler_func=(lambda handler, forms, test_instance=self,
                               loop_counter=i:\
-                    _extension_page_load_info_handler(handler, forms,
-                                                      loop_counter, self)))
+                    _extension_page_time_info_handler(handler, forms,
+                                                      loop_counter,
+                                                      test_instance)))
 
             # setup a handler to simulate waking up the base of a detachable
             # on user interaction. On scrolling, wake for 1s, on page
@@ -362,9 +367,9 @@ class power_LoadTest(arc.ArcTest):
                                         latch)
 
             script_logging.set();
-            pagelt_tracking.set();
-            self._plog.checkpoint('loop%d' % (i), start_time)
-            self._tlog.checkpoint('loop%d' % (i), start_time)
+            pagetime_tracking.set();
+            for log in self._meas_logs:
+                log.checkpoint('loop%d' % (i), start_time)
             if self._verbose:
                 logging.debug('loop %d completed', i)
 
@@ -377,7 +382,6 @@ class power_LoadTest(arc.ArcTest):
         psr.refresh()
         self._tmp_keyvals['minutes_battery_life_tested'] = (t1 - t0) / 60
         self._tmp_keyvals.update(psr.get_keyvals())
-
 
     def postprocess_iteration(self):
         """Postprocess: write keyvals / log and send data to power dashboard."""
@@ -410,9 +414,13 @@ class power_LoadTest(arc.ArcTest):
                 _log_stats(kname, self._stats[kname])
 
 
-        keyvals = self._plog.calc()
-        keyvals.update(self._tlog.calc())
-        keyvals.update(self._clog.calc())
+        for task, tstart, tend in self._task_tracker:
+            for log in self._meas_logs:
+                log.checkpoint(task, tstart, tend)
+
+        keyvals = {}
+        for log in self._meas_logs:
+            keyvals.update(log.calc())
         keyvals.update(self._statomatic.publish())
 
         if self._log_mem_bandwidth:
@@ -498,9 +506,11 @@ class power_LoadTest(arc.ArcTest):
                                            higher_is_better=False)
 
         self.write_perf_keyval(keyvals)
-        self._plog.save_results(self.resultsdir)
-        self._tlog.save_results(self.resultsdir)
-        self._clog.save_results(self.resultsdir)
+        for log in self._meas_logs:
+            log.save_results(self.resultsdir)
+        # checkpoint data for all measurement loggers should be the same
+        # just save checkpoint data for one of them
+        self._plog.save_checkpoint_data(self.resultsdir)
         pdash = power_dashboard.PowerLoggerDashboard( \
                 self._plog, self.tagged_testname, self.resultsdir)
         pdash.upload()
@@ -750,41 +760,79 @@ def _extension_log_handler(handler, form, loop_number):
             # httpd adds them automatically so we remove them again
             del handler.server._form_entries[field]
 
-def _extension_page_load_info_handler(handler, form, loop_number, tracker):
+def _extension_page_time_info_handler(handler, form, loop_number,
+                                      test_instance):
+    page_timestamps = []
+
     stats_ids = ['mean', 'min', 'max', 'std']
-    time_measurements = []
+    loadtime_measurements = []
     sorted_pagelt = []
     #show up to this number of slow page-loads
     num_slow_page_loads = 5;
 
     if not form:
-        logging.debug("no page load information returned")
+        logging.debug("no page time information returned")
         return;
 
     for field in form.keys():
-        url = field[str.find(field, "http"):]
-        load_time = int(form[field].value)
+        url = field[str.find(field, "http"):]  # remove unique url salt
+        page = json.loads(form[field].value)
 
-        time_measurements.append(load_time)
-        sorted_pagelt.append((url, load_time))
+        logging.debug("[extension] @ loop_%d url: %s start_time: %d",
+            loop_number, url, page['start_time'])
 
-        logging.debug("[extension] @ loop_%d url: %s load time: %d ms",
-            loop_number, url, load_time)
+        if page['end_load_time']:
+            logging.debug("[extension] @ loop_%d url: %s end_load_time: %d",
+                loop_number, url, page['end_load_time'])
+
+            load_time = page['end_load_time'] - page['start_time']
+
+            loadtime_measurements.append(load_time)
+            sorted_pagelt.append((url, load_time))
+
+            logging.debug("[extension] @ loop_%d url: %s load time: %d ms",
+                loop_number, url, load_time)
+
+        logging.debug("[extension] @ loop_%d url: %s end_browse_time: %d",
+            loop_number, url, page['end_browse_time'])
+
+        page_timestamps.append(page)
+
         # we don't want to add url information to our keyvals.
         # httpd adds them automatically so we remove them again
         del handler.server._form_entries[field]
 
-    time_measurements = numpy.array(time_measurements)
-    stats_vals = [time_measurements.mean(), time_measurements.min(),
-    time_measurements.max(),time_measurements.std()]
+    page_base = 'loop%d_web_page_' % loop_number
+    for page in page_timestamps:
+        page_failed = "_failed"
+        # timestamps from javascript are in milliseconds, change to seconds
+        scale = 1.0/1000
+        if page['end_load_time']:
+            tagname = page_base + page['url'] + "_load"
+            test_instance._task_tracker.append((tagname,
+                page['start_time'] * scale, page['end_load_time'] * scale))
+
+            tagname = page_base + page['url'] + "_browse"
+            test_instance._task_tracker.append((tagname,
+                page['end_load_time'] * scale, page['end_browse_time'] * scale))
+
+            page_failed = ""
+
+        tagname = page_base + page['url'] + page_failed
+        test_instance._task_tracker.append((tagname,
+            page['start_time'] * scale, page['end_browse_time'] * scale))
+
+    loadtime_measurements = numpy.array(loadtime_measurements)
+    stats_vals = [loadtime_measurements.mean(), loadtime_measurements.min(),
+        loadtime_measurements.max(),loadtime_measurements.std()]
 
     key_base = 'ext_ms_page_load_time_'
     for i in range(len(stats_ids)):
         key = key_base + stats_ids[i]
-        if key in tracker._tmp_keyvals:
-            tracker._tmp_keyvals[key] += "_%.2f" % stats_vals[i]
+        if key in test_instance._tmp_keyvals:
+            test_instance._tmp_keyvals[key] += "_%.2f" % stats_vals[i]
         else:
-            tracker._tmp_keyvals[key] = "%.2f" % stats_vals[i]
+            test_instance._tmp_keyvals[key] = "%.2f" % stats_vals[i]
 
 
     sorted_pagelt.sort(key=lambda item: item[1], reverse=True)

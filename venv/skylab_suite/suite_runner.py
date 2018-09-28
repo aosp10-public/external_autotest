@@ -26,6 +26,10 @@ SKYLAB_DRONE_SWARMING_WORKER = '/opt/infra-tools/usr/bin/skylab_swarming_worker'
 
 SUITE_WAIT_SLEEP_INTERVAL_SECONDS = 30
 
+# See #5 in crbug.com/873886 for more details.
+_NOT_SUPPORTED_DEPENDENCIES = ['skip_provision', 'cleanup-reboot', 'rpm',
+                               'modem_repair']
+
 
 def run(test_specs, suite_handler, dry_run=False):
     """Run a CrOS dynamic test suite.
@@ -133,8 +137,8 @@ def _schedule_test_specs(test_specs, suite_handler, suite_id, dry_run=False):
     for test_spec in test_specs:
         test_task_id = _schedule_test(
                 test_spec,
-                suite_handler.is_provision(),
                 suite_id=suite_id,
+                use_fallback=suite_handler.should_use_fallback(),
                 dry_run=dry_run)
         suite_handler.add_test_by_task_id(
                 test_task_id,
@@ -144,7 +148,7 @@ def _schedule_test_specs(test_specs, suite_handler, suite_id, dry_run=False):
                         previous_retried_ids=[]))
 
 
-def _make_provision_swarming_cmd():
+def _make_new_swarming_cmd():
     basic_swarming_cmd = swarming_lib.get_basic_swarming_cmd('post')
     return basic_swarming_cmd + ['tasks/new']
 
@@ -182,12 +186,15 @@ def _make_trigger_swarming_cmd(cmd, dimensions, test_spec,
     return swarming_cmd
 
 
-def _get_suite_cmd(test_spec, suite_id, is_provision=False):
-    """Get the command for running a suite.
+def _get_suite_cmd(test_spec, suite_id):
+    """Return the commands for running a suite with or without provision.
 
     @param test_spec: a cros_suite.TestSpec object.
     @param suite_id: a string of parent suite's swarming task id.
-    @param is_provision: whether the command is for provision.
+
+    @return a list of commands: [cmd, cmd_with_fallback], in which cmd is the
+        normal cmd to kick off a test, cmd_with_fallback is the cmd to
+        provision the DUT before, then kick off the test.
     """
     constants = autotest.load('server.cros.dynamic_suite.constants')
     job_keyvals = test_spec.keyvals.copy()
@@ -199,17 +206,18 @@ def _get_suite_cmd(test_spec, suite_id, is_provision=False):
     if test_spec.test.test_type == 'client':
       cmd += ['-client-test']
 
+    cmd += ['-keyvals', _convert_dict_to_string(job_keyvals)]
     cmd += ['-task-name', test_spec.test.name]
-    if is_provision:
-        cmd += ['-provision-labels', 'cros-version:%s' % test_spec.build]
 
-    return cmd
+    return [cmd, cmd + ['-provision-labels',
+                        'cros-version:%s' % test_spec.build]]
 
 
-def _run_provision_cmd(cmd, dimensions, test_spec, suite_id):
-    """Kick off a provision swarming cmd.
+def _run_swarming_cmd_with_fallback(cmds, dimensions, test_spec, suite_id):
+    """Kick off a fallback swarming cmd.
 
-    @param cmd: The raw command to run in lab.
+    @param cmds: A list of commands: [cmd, cmd_with_fallback]. Each of the cmd
+        is a list.
     @param dimensions: A dict of dimensions used to form the swarming cmd.
     @param test_spec: a cros_suite.TestSpec object.
     @param suite_id: The suite id of the test to kick off.
@@ -225,22 +233,32 @@ def _run_provision_cmd(cmd, dimensions, test_spec, suite_id):
     if suite_id is not None:
         tags += ['parent_task_id:%s' % suite_id]
 
+    # TODO (xixuan): Find a better way to not hard-code expiration secs for
+    # provision slice. Now hard-code it as 5mins.
+    provision_expiration_secs = 5 * 60
+    all_expiration_secs = [
+            provision_expiration_secs,
+            test_spec.expiration_secs - provision_expiration_secs]
+
+    # Use first slice to kick off normal cmd without '-provision-labels',
+    # since the assigned DUT is already provisioned by given build.
+    # Use second slice to kick off cmd_with_fallback to enable provision before
+    # running tests, as the assigned DUT hasn't been provisioned.
     json_request = swarming_lib.make_fallback_request_dict(
-            cmds=[cmd] * len(all_dimensions),
+            cmds=cmds,
             slices_dimensions=all_dimensions,
+            slices_expiration_secs=all_expiration_secs,
             task_name=test_spec.test.name,
             priority=test_spec.priority,
             tags=tags,
             user=SKYLAB_SUITE_USER,
             parent_task_id=suite_id,
-            expiration_secs=test_spec.expiration_secs,
             grace_period_secs=test_spec.grace_period_secs,
             execution_timeout_secs=test_spec.execution_timeout_secs,
             io_timeout_secs=test_spec.io_timeout_secs)
 
     cros_build_lib = autotest.chromite_load('cros_build_lib')
-    provision_cmd = _make_provision_swarming_cmd()
-    result = cros_build_lib.RunCommand(provision_cmd,
+    result = cros_build_lib.RunCommand( _make_new_swarming_cmd(),
                                        input=json.dumps(json_request),
                                        env=os.environ.copy(),
                                        capture_output=True)
@@ -259,9 +277,7 @@ def _run_swarming_cmd(cmd, dimensions, test_spec, temp_json_path, suite_id):
 
     @return the swarming task id of this task.
     """
-    # TODO (xixuan): Add this to provision cmd when cron job for special task
-    # is working.
-    dimensions['dut_state'] = swarming_lib.SWARMING_DUT_READY_STATUS
+    dimensions['provisionable-cros-version'] = test_spec.build
     trigger_cmd = _make_trigger_swarming_cmd(cmd, dimensions, test_spec,
                                              temp_json_path, suite_id)
     cros_build_lib = autotest.chromite_load('cros_build_lib')
@@ -276,19 +292,20 @@ def _run_swarming_cmd(cmd, dimensions, test_spec, temp_json_path, suite_id):
         return result['tasks'][test_spec.test.name]['task_id']
 
 
-def _schedule_test(test_spec, is_provision, suite_id=None,
+def _schedule_test(test_spec,suite_id=None, use_fallback=False,
                    dry_run=False):
     """Schedule a CrOS test.
 
     @param test_spec: A cros_suite.TestSpec object.
-    @param is_provision: A boolean, whether to kick off a provision test.
     @param suite_id: the suite task id of the test.
+    @param use_fallback: A boolean, whether to kick off a fallback swarming
+        request.
     @param dry_run: Whether to kick off a dry run of a swarming cmd.
 
     @return the swarming task id of this task.
     """
     logging.info('Scheduling test %s', test_spec.test.name)
-    cmd = _get_suite_cmd(test_spec, suite_id, is_provision=is_provision)
+    cmd, cmd_with_fallback = _get_suite_cmd(test_spec, suite_id)
     if dry_run:
         cmd = ['/bin/echo'] + cmd
         test_spec.test.name = 'Echo ' + test_spec.test.name
@@ -296,14 +313,22 @@ def _schedule_test(test_spec, is_provision, suite_id=None,
     dimensions = {'pool': swarming_lib.SKYLAB_DRONE_POOL,
                   'label-pool': swarming_lib.SWARMING_DUT_POOL_MAP.get(
                           test_spec.pool),
-                  'label-board': test_spec.board}
+                  'label-board': test_spec.board,
+                  'dut_state': swarming_lib.SWARMING_DUT_READY_STATUS}
+    for dep in test_spec.test.dependencies:
+        if dep in _NOT_SUPPORTED_DEPENDENCIES:
+            logging.warning('Dependency %s is not supported in skylab', dep)
+            continue
+
+        # label-tag hasn't been an official label for skylab bots.
+        dimensions['label-tag'] = dep
 
     osutils = autotest.chromite_load('osutils')
     with osutils.TempDir() as tempdir:
         temp_json_path = os.path.join(tempdir, 'temp_summary.json')
-        if is_provision:
-            return _run_provision_cmd(cmd, dimensions, test_spec,
-                                      suite_id)
+        if use_fallback:
+            return _run_swarming_cmd_with_fallback(
+                    [cmd, cmd_with_fallback], dimensions, test_spec, suite_id)
         else:
             return _run_swarming_cmd(cmd, dimensions, test_spec,
                                      temp_json_path, suite_id)
@@ -361,7 +386,8 @@ def _wait_for_results(suite_handler, dry_run=False):
     """
     timeout_util = autotest.chromite_load('timeout_util')
     try:
-        with timeout_util.Timeout(suite_handler.timeout_mins * 60):
+        with timeout_util.Timeout(suite_handler.timeout_mins * 60 -
+                                  suite_handler.passed_mins * 60):
             _loop_and_wait_forever(suite_handler, dry_run)
     except timeout_util.TimeoutError:
         logging.error('Timeout in waiting for child tasks.')
@@ -391,8 +417,8 @@ def _retry_test(suite_handler, task_id, dry_run=False):
                  last_retry_spec.remaining_retries - 1)
     retried_task_id = _schedule_test(
             last_retry_spec.test_spec,
-            suite_handler.is_provision(),
             suite_id=suite_handler.suite_id,
+            use_fallback=suite_handler.should_use_fallback(),
             dry_run=dry_run)
     previous_retried_ids = last_retry_spec.previous_retried_ids + [task_id]
     suite_handler.add_test_by_task_id(
@@ -403,3 +429,17 @@ def _retry_test(suite_handler, task_id, dry_run=False):
                     previous_retried_ids=previous_retried_ids))
     suite_handler.set_max_retries(suite_handler.max_retries - 1)
     suite_handler.remove_test_by_task_id(task_id)
+
+
+def _convert_dict_to_string(input_dict):
+    """Convert dictionary to a string.
+
+    @param input_dict: A dictionary.
+    """
+    for k, v in input_dict.iteritems():
+        if isinstance(v, dict):
+            input_dict[k] = _convert_dict_to_string(v)
+        else:
+            input_dict[k] = str(v)
+
+    return json.dumps(input_dict)
