@@ -258,8 +258,8 @@ class TradefedTest(test.test):
             adb_global_option = ('-s', host_port)
         kwargs['args'] = adb_global_option + kwargs.get('args', ())
         result = self._run('adb', **kwargs)
-        logging.debug('adb %s:\n%s', ' '.join(kwargs.get('args')),
-                      result.stdout + result.stderr)
+        logging.info('adb %s:\n%s', ' '.join(kwargs.get('args')),
+                     result.stdout + result.stderr)
         return result
 
     def _try_adb_connect(self, host):
@@ -280,9 +280,9 @@ class TradefedTest(test.test):
         result = self._run_adb_cmd(host, args=('devices',))
         if not re.search(r'{}\s+(device|unauthorized)'.format(
                 re.escape(host_port)), result.stdout):
-            logging.debug('No result found in with pattern: %s',
-                          r'{}\s+(device|unauthorized)'.format(
-                              re.escape(host_port)))
+            logging.info('No result found in with pattern: %s',
+                         r'{}\s+(device|unauthorized)'.format(
+                             re.escape(host_port)))
             return False
 
         # Actually test the connection with an adb command as there can be
@@ -870,7 +870,7 @@ class TradefedTest(test.test):
         board = self._get_board_name()
         if board in self._BOARD_RETRY:
             return self._BOARD_RETRY[board]
-        logging.debug('No board retry specified for board: %s', board)
+        logging.info('No board retry specified for board: %s', board)
         return None
 
     def _get_channel_retry(self):
@@ -1144,6 +1144,11 @@ class TradefedTest(test.test):
 
                 # Check if all the tests passed.
                 if failed <= waived and all_done:
+                    if not all(accurate):
+                        raise error.TestFail(
+                            'Failed: Not all tests were executed. After %d '
+                            'retries passing %d tests, waived=%d. %s' % (
+                                steps, passed, waived, self.summary))
                     # TODO(ihf): Make this error.TestPass('...') once
                     # available.
                     if steps > 0 and self._warn_on_test_retry:
@@ -1151,11 +1156,6 @@ class TradefedTest(test.test):
                             'Passed: after %d retries passing %d tests, '
                             'waived=%d. %s' % (steps, passed, waived,
                                                self.summary))
-                    if not all(accurate):
-                        raise error.TestWarn(
-                            'Passed: after %d retries passing %d tests, '
-                            'waived=%d. Tests may not be accurate. %s' % (
-                                steps, passed, waived, self.summary))
                     return
 
         if session_id == None:

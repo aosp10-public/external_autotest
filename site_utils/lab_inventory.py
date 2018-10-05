@@ -61,6 +61,7 @@ import time
 import common
 from autotest_lib.client.bin import utils
 from autotest_lib.client.common_lib import time_utils
+from autotest_lib.frontend.afe.json_rpc import proxy
 from autotest_lib.server import constants
 from autotest_lib.server import site_utils
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
@@ -79,11 +80,9 @@ MANAGED_POOLS = constants.Pools.MANAGED_POOLS
 #   + 'adb' - We're not ready to monitor Android or Brillo hosts.
 #   + 'board:guado_moblab' - These are maintained by a separate
 #     process that doesn't use this script.
-#   + 'board:scarlet' due to crbug.com/846012 and other issues discussed at
-#   https://bugs.chromium.org/p/chromium/issues/detail?id=861806#c2
 #   + 'board:veyron_rialto' due to crbug.com/854404
 
-_EXCLUDED_LABELS = {'adb', 'board:guado_moblab', 'board:scarlet',
+_EXCLUDED_LABELS = {'adb', 'board:guado_moblab',
                     'board:veyron_rialto'}
 
 # _DEFAULT_DURATION:
@@ -127,21 +126,36 @@ _REPAIR_LOOP_THRESHOLD = 4
 
 _METRICS_PREFIX = 'chromeos/autotest/inventory'
 _UNTESTABLE_PRESENCE_METRIC = metrics.BooleanMetric(
-    '%s/untestable' % _METRICS_PREFIX,
+    _METRICS_PREFIX + '/untestable',
     'DUTs that cannot be scheduled for testing')
 
+_MISSING_DUT_METRIC = metrics.Counter(
+    _METRICS_PREFIX + '/missing', 'DUTs which cannot be found by lookup queries'
+    ' because they are invalid or deleted')
+
+def _get_diagnosis_safely(history, prop='diagnosis'):
+    return_prop = {'diagnosis': 0, 'task': 1}[prop]
+    dut_present = True
+    try:
+        return history.last_diagnosis()[return_prop]
+    except proxy.JSONRPCException as e:
+        logging.warn(e)
+        dut_present = False
+    finally:
+        _MISSING_DUT_METRIC.increment(
+            fields={'host': history.hostname, 'presence': dut_present})
 
 def _host_is_working(history):
-    return history.last_diagnosis()[0] == status_history.WORKING
+    return _get_diagnosis_safely(history) == status_history.WORKING
 
 
 def _host_is_broken(history):
-    return history.last_diagnosis()[0] == status_history.BROKEN
+     return _get_diagnosis_safely(history) == status_history.BROKEN
 
 
 def _host_is_idle(history):
     idle_statuses = {status_history.UNUSED, status_history.UNKNOWN}
-    return history.last_diagnosis()[0] in idle_statuses
+    return _get_diagnosis_safely(history) in idle_statuses
 
 
 class _HostSetInventory(object):
@@ -701,7 +715,7 @@ def _generate_repair_recommendation(inventory, num_recommend):
     for h in recommendation:
         servo_name = servo_host.make_servo_hostname(h.host.hostname)
         servo_present = utils.host_is_in_lab_zone(servo_name)
-        _, event = h.last_diagnosis()
+        event = _get_diagnosis_safely(h, 'task')
         line = line_fmt % (
                 h.host.hostname, h.host_model,
                 'Yes' if servo_present else 'No', event.job_url)
@@ -1021,7 +1035,7 @@ def _dut_in_repair_loop(history):
     # time of this writing, this check against the diagnosis task
     # reduces the cost of finding loops in the full inventory from hours
     # to minutes.
-    if history.last_diagnosis()[1].name != 'Repair':
+    if _get_diagnosis_safely(history, 'task').name != 'Repair':
         return False
     repair_ok_count = 0
     for task in history:
