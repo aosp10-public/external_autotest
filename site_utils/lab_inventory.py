@@ -133,29 +133,39 @@ _MISSING_DUT_METRIC = metrics.Counter(
     _METRICS_PREFIX + '/missing', 'DUTs which cannot be found by lookup queries'
     ' because they are invalid or deleted')
 
-def _get_diagnosis_safely(history, prop='diagnosis'):
-    return_prop = {'diagnosis': 0, 'task': 1}[prop]
+# _Diagnosis - namedtuple corresponding to the return value from
+# `HostHistory.last_diagnosis()`
+_Diagnosis = collections.namedtuple('_Diagnosis', ['status', 'task'])
+
+def _get_diagnosis(history):
     dut_present = True
     try:
-        return history.last_diagnosis()[return_prop]
+        diagnosis = _Diagnosis(*history.last_diagnosis())
+        if (diagnosis.status == status_history.BROKEN
+                and diagnosis.task.end_time < history.start_time):
+            return _Diagnosis(status_history.UNUSED, diagnosis.task)
+        else:
+            return diagnosis
     except proxy.JSONRPCException as e:
         logging.warn(e)
         dut_present = False
     finally:
         _MISSING_DUT_METRIC.increment(
             fields={'host': history.hostname, 'presence': dut_present})
+    return _Diagnosis(None, None)
+
 
 def _host_is_working(history):
-    return _get_diagnosis_safely(history) == status_history.WORKING
+    return _get_diagnosis(history).status == status_history.WORKING
 
 
 def _host_is_broken(history):
-     return _get_diagnosis_safely(history) == status_history.BROKEN
+    return _get_diagnosis(history).status == status_history.BROKEN
 
 
 def _host_is_idle(history):
     idle_statuses = {status_history.UNUSED, status_history.UNKNOWN}
-    return _get_diagnosis_safely(history) in idle_statuses
+    return _get_diagnosis(history).status in idle_statuses
 
 
 class _HostSetInventory(object):
@@ -712,14 +722,17 @@ def _generate_repair_recommendation(inventory, num_recommend):
     line_fmt = '%-30s %-16s %-6s\n    %s '
     message = ['Repair recommendations:\n',
                line_fmt % ( 'Hostname', 'Model', 'Servo?', 'Logs URL')]
-    for h in recommendation:
-        servo_name = servo_host.make_servo_hostname(h.host.hostname)
-        servo_present = utils.host_is_in_lab_zone(servo_name)
-        event = _get_diagnosis_safely(h, 'task')
-        line = line_fmt % (
-                h.host.hostname, h.host_model,
-                'Yes' if servo_present else 'No', event.job_url)
-        message.append(line)
+    if recommendation:
+        for h in recommendation:
+            servo_name = servo_host.make_servo_hostname(h.host.hostname)
+            servo_present = utils.host_is_in_lab_zone(servo_name)
+            event = _get_diagnosis(h).task
+            line = line_fmt % (
+                    h.host.hostname, h.host_model,
+                    'Yes' if servo_present else 'No', event.job_url)
+            message.append(line)
+    else:
+        message.append('(No DUTs to repair)')
     return '\n'.join(message)
 
 
@@ -1035,7 +1048,7 @@ def _dut_in_repair_loop(history):
     # time of this writing, this check against the diagnosis task
     # reduces the cost of finding loops in the full inventory from hours
     # to minutes.
-    if _get_diagnosis_safely(history, 'task').name != 'Repair':
+    if _get_diagnosis(history).task.name != 'Repair':
         return False
     repair_ok_count = 0
     for task in history:
@@ -1268,6 +1281,9 @@ def _parse_command(argv):
     parser.add_argument('--debug', action='store_true',
                         help='Print e-mail, metrics messages on stdout '
                              'without sending them.')
+    parser.add_argument('--no-metrics', action='store_false',
+                        dest='use_metrics',
+                        help='Suppress generation of Monarch metrics.')
     parser.add_argument('--logdir', default=_get_default_logdir(argv[0]),
                         help='Directory where logs will be written.')
     parser.add_argument('modelnames', nargs='*',
@@ -1335,30 +1351,33 @@ def main(argv):
         sys.exit(1)
     _configure_logging(arguments)
 
-    if arguments.debug:
-        logging.info('--debug mode: Will not  report metrics to monarch')
-        metrics_file = '/dev/null'
-    else:
-        metrics_file = None
-
-    with site_utils.SetupTsMonGlobalState(
-            'lab_inventory', debug_file=metrics_file,
-            auto_flush=False):
-        success = False
-        try:
-            with metrics.SecondsTimer('%s/duration' % _METRICS_PREFIX):
-                _perform_inventory_reports(arguments)
-            success = True
-        except KeyboardInterrupt:
-            pass
-        except (EnvironmentError, Exception):
-            # Our cron setup doesn't preserve stderr, so drop extra breadcrumbs.
-            logging.exception('Error escaped main')
-            raise
-        finally:
-            metrics.Counter('%s/tick' % _METRICS_PREFIX).increment(
-                    fields={'success': success})
-            metrics.Flush()
+    try:
+        if arguments.use_metrics:
+            if arguments.debug:
+                logging.info('Debug mode: Will not report metrics to monarch.')
+                metrics_file = '/dev/null'
+            else:
+                metrics_file = None
+            with site_utils.SetupTsMonGlobalState(
+                    'lab_inventory', debug_file=metrics_file,
+                    auto_flush=False):
+                success = False
+                try:
+                    with metrics.SecondsTimer('%s/duration' % _METRICS_PREFIX):
+                        _perform_inventory_reports(arguments)
+                    success = True
+                finally:
+                    metrics.Counter('%s/tick' % _METRICS_PREFIX).increment(
+                            fields={'success': success})
+                    metrics.Flush()
+        else:
+            _perform_inventory_reports(arguments)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        # Our cron setup doesn't preserve stderr, so drop extra breadcrumbs.
+        logging.exception('Error escaped main')
+        raise
 
 
 def get_inventory(afe):

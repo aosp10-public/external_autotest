@@ -152,7 +152,10 @@ class cpufreq(object):
 
     def __write_file(self, file_name, data):
         path = os.path.join(self.__base_path, file_name)
-        utils.open_write_close(path, data)
+        try:
+            utils.open_write_close(path, data)
+        except IOError as e:
+            logging.warn('write of %s failed: %s', path, str(e))
 
     def __read_file(self, file_name):
         path = os.path.join(self.__base_path, file_name)
@@ -235,7 +238,7 @@ class cpufreq(object):
         cause any issues.
         """
         logging.debug('Disable boost')
-        self.__write_file('../boost', '0')
+        self.__write_file('../../cpufreq/boost', '0')
 
     def enable_boost(self):
         """Enable boost.
@@ -247,4 +250,4 @@ class cpufreq(object):
         cause any issues.
         """
         logging.debug('Enable boost')
-        self.__write_file('../boost', '1')
+        self.__write_file('../../cpufreq/boost', '1')
