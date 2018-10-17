@@ -33,7 +33,6 @@ from autotest_lib.server.cros import dnsname_mangler
 from autotest_lib.server.cros.dynamic_suite import control_file_getter
 from autotest_lib.server.cros.dynamic_suite import frontend_wrappers
 from autotest_lib.server.cros.servo import servo
-from autotest_lib.server.hosts import base_classes
 from autotest_lib.server.hosts import servo_repair
 from autotest_lib.server.hosts import ssh_host
 from autotest_lib.site_utils.rpm_control_system import rpm_client
@@ -740,15 +739,6 @@ def get_servo_args_for_host(dut_host):
     servo_args = {k: v for k, v in info.attributes.iteritems()
                   if k in SERVO_ATTR_KEYS}
 
-    # TODO(jrbarnette):  This test to use the default lab servo hostname
-    # is a legacy that we need only until every host in the DB has
-    # proper attributes.
-    if (SERVO_HOST_ATTR not in servo_args
-        and not (utils.in_moblab_ssp() or lsbrelease_utils.is_moblab())):
-        servo_host = make_servo_hostname(dut_host.hostname)
-        if utils.host_is_in_lab_zone(servo_host):
-            servo_args[SERVO_HOST_ATTR] = servo_host
-
     if SERVO_PORT_ATTR in servo_args:
         try:
             servo_args[SERVO_PORT_ATTR] = int(servo_args[SERVO_PORT_ATTR])
@@ -856,8 +846,6 @@ def create_servo_host(dut, servo_args, try_lab_servo=False,
                                servo_args[SERVO_HOST_ATTR])),
             **servo_args
     )
-    base_classes.send_creation_metric(newhost)
-
     # Note that the logic of repair() includes everything done
     # by verify().  It's sufficient to call one or the other;
     # we don't need both.
