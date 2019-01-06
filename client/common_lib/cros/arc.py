@@ -234,7 +234,7 @@ def adb_install(apk, auto_grant_permissions=True):
     permissions. Most tests should not care.
     """
     flags = '-g' if auto_grant_permissions else ''
-    return adb_cmd('install -r %s %s' % (flags, apk), timeout=60*5)
+    return adb_cmd('install -r -t %s %s' % (flags, apk), timeout=60*5)
 
 
 def adb_uninstall(apk):
@@ -527,7 +527,7 @@ def _is_in_installed_packages_list(package, option=None):
 
     if not ret:
         logging.info('Could not find "%s" in %s',
-                     (package_entry, str(packages)))
+                     package_entry, str(packages))
     return ret
 
 
